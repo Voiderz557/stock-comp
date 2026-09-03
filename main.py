@@ -21,7 +21,9 @@ if ticker == "":
 # Download historical stock data
 stock = yf.Ticker(ticker)
 data = stock.history(period=DATA_PERIOD)
-
+if data.empty:
+    print("No data found for that ticker.")
+    exit()
 # Calculate stock indicators
 momentum_5d, momentum_20d = calculate_momentum(data)
 current_price, moving_average_20 = calculate_moving_average(data, MOVING_AVERAGE_DAYS)

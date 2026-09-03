@@ -12,6 +12,10 @@ def calculate_returns(data, days):
 
 def calculate_momentum(data):
     closing_prices = data["Close"]
+    required_days = LONG_MOMENTUM_DAYS + 1
+
+    if len(data) < required_days:
+        raise ValueError("Not enough historical data.")
 
     current_price = closing_prices.iloc[-1]
 

@@ -95,7 +95,9 @@ def show_dashboard(
         "#16833b" if momentum_20d >= 0 else "#b3261e",
     )
 
-    moving_average_line = data["Close"].rolling(window=20).mean()
+    moving_average_line = data["Close"].rolling(
+        window=MOVING_AVERAGE_DAYS
+    ).mean()
 
     panels["main_chart"].plot(
         data.index,
