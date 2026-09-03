@@ -14,7 +14,14 @@ SCANNER_RESULT_LIMIT = 20
 BACKTEST_STARTING_CASH = 100_000.00
 BACKTEST_START_DATE = "2025-01-01"
 BACKTEST_END_DATE = "2025-06-30"
-BACKTEST_MAX_POSITIONS = 5
 BACKTEST_BENCHMARK = "SPY"
 BACKTEST_FEE_RATE = 0.0
+MIN_STOCK_PRICE = 5.00
+MAX_POSITION_VALUE = 20_000
+# "initial_allocation" allows appreciation above the cap. Change to
+# "rebalance_market_value" if official rules require trimming at rebalance.
+POSITION_LIMIT_MODE = "initial_allocation"
 MARKET_DATA_CACHE_DIR = "data_cache"
+MANUAL_HISTORICAL_DATA_DIR = "historical_data"
+YFINANCE_REQUEST_TIMEOUT_SECONDS = 8
+YFINANCE_HARD_TIMEOUT_SECONDS = 12

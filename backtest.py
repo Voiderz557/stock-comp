@@ -4,16 +4,19 @@ from config import (
     BACKTEST_BENCHMARK,
     BACKTEST_END_DATE,
     BACKTEST_FEE_RATE,
-    BACKTEST_MAX_POSITIONS,
     BACKTEST_START_DATE,
     BACKTEST_STARTING_CASH,
     LONG_MOMENTUM_DAYS,
+    MAX_POSITION_VALUE,
+    MIN_STOCK_PRICE,
     MOVING_AVERAGE_DAYS,
+    POSITION_LIMIT_MODE,
 )
 from historical_universe import (
     UNIVERSE_SOURCE,
     get_backtest_tickers,
     get_historical_universe,
+    get_membership_ranges,
 )
 from market_data import load_market_data
 from scanner import analyze_stock
@@ -32,22 +35,69 @@ def download_backtest_data(
     )
     warmup_start = start_date - pd.Timedelta(days=required_days * 3)
 
-    tickers = get_backtest_tickers(start_date, end_date)
-    if benchmark not in tickers:
-        tickers.append(benchmark)
-
+    constituent_tickers = [
+        ticker
+        for ticker in get_backtest_tickers(start_date, end_date)
+        if ticker != benchmark
+    ]
     try:
-        downloaded_data, cache_report = load_market_data(
-            tickers,
+        benchmark_data, benchmark_report = load_market_data(
+            [benchmark],
             warmup_start,
             end_date,
             status_callback=status_callback,
+            required_ranges={benchmark: [(start_date, end_date)]},
         )
     except Exception as error:
-        raise RuntimeError("Market data could not be loaded.") from error
+        raise RuntimeError(
+            f"{benchmark} benchmark loader failed: {error}"
+        ) from error
 
-    if not any(not frame.empty for frame in downloaded_data.values()):
-        raise RuntimeError("The market data loader returned no results.")
+    if get_ticker_data(benchmark_data, benchmark) is None:
+        failures = benchmark_report.get("Data Source Failures", [])
+        reason = failures[0].get("Reason") if failures else "no rows returned"
+        raise RuntimeError(
+            f"{benchmark} benchmark data unavailable for "
+            f"{start_date.date()} through {end_date.date()}: {reason}"
+        )
+
+    try:
+        constituent_data, constituent_report = load_market_data(
+            constituent_tickers,
+            warmup_start,
+            end_date,
+            status_callback=status_callback,
+            required_ranges=get_membership_ranges(start_date, end_date),
+        )
+    except Exception as error:
+        raise RuntimeError("Constituent market data could not be loaded.") from error
+
+    downloaded_data = {**constituent_data, **benchmark_data}
+    cache_report = {
+        "Status": (
+            "DOWNLOADING"
+            if "DOWNLOADING"
+            in {benchmark_report["Status"], constituent_report["Status"]}
+            else "USING CACHE"
+        ),
+        "Downloaded Tickers": (
+            benchmark_report["Downloaded Tickers"]
+            + constituent_report["Downloaded Tickers"]
+        ),
+        "Cache Directory": benchmark_report["Cache Directory"],
+        "Data Source Failures": constituent_report["Data Source Failures"],
+        "Unavailable Valid Constituents": constituent_report[
+            "Unavailable Valid Constituents"
+        ],
+        "Secondary Sources Used": (
+            benchmark_report["Secondary Sources Used"]
+            + constituent_report["Secondary Sources Used"]
+        ),
+        "Ticker Classifications": {
+            **constituent_report["Ticker Classifications"],
+            **benchmark_report["Ticker Classifications"],
+        },
+    }
 
     return downloaded_data, cache_report
 
@@ -103,8 +153,8 @@ def get_valuation_price(ticker_data, date):
 def rank_buy_candidates(
     downloaded_data,
     rebalance_date,
-    max_positions,
     universe=None,
+    min_stock_price=MIN_STOCK_PRICE,
 ):
     """Rank BUY stocks using information known before the trading day."""
     candidates = []
@@ -118,7 +168,8 @@ def rank_buy_candidates(
         if ticker_data is None:
             continue
 
-        if get_trade_price(ticker_data, rebalance_date) is None:
+        trade_price = get_trade_price(ticker_data, rebalance_date)
+        if trade_price is None or trade_price < min_stock_price:
             continue
 
         # LOOK-AHEAD PROTECTION:
@@ -142,7 +193,7 @@ def rank_buy_candidates(
         reverse=True,
     )
 
-    return candidates[:max_positions]
+    return candidates
 
 
 def rebalance_portfolio(
@@ -153,8 +204,10 @@ def rebalance_portfolio(
     holdings,
     trades,
     fee_rate,
+    max_position_value=MAX_POSITION_VALUE,
+    position_limit_mode=POSITION_LIMIT_MODE,
 ):
-    """Rebalance selected stocks to equal weights at the day's Open."""
+    """Allocate cash down the ranked BUY list with a per-stock value cap."""
     selected_tickers = [stock["Ticker"] for stock in selected_stocks]
     trade_prices = {}
 
@@ -162,36 +215,29 @@ def rebalance_portfolio(
         ticker_data = get_ticker_data(downloaded_data, ticker)
 
         if ticker_data is None:
-            return cash
+            continue
 
         price = get_trade_price(ticker_data, rebalance_date)
 
         if price is None:
-            # Keep the existing portfolio unchanged if every needed stock
-            # cannot be traded at this Open.
-            return cash
+            continue
 
         trade_prices[ticker] = price
 
-    portfolio_value = cash + sum(
-        shares * trade_prices[ticker]
-        for ticker, shares in holdings.items()
-    )
-
-    if selected_tickers:
-        target_value = portfolio_value / len(selected_tickers)
-    else:
-        target_value = 0.0
-
-    # Sell removed positions and reduce overweight positions before buying.
+    # Sell positions that are no longer BUY candidates. The alternate policy
+    # also trims appreciated positions if official rules later require it.
     for ticker in list(holdings):
-        price = trade_prices[ticker]
+        price = trade_prices.get(ticker)
+        if price is None:
+            continue
         current_shares = holdings[ticker]
 
-        if ticker in selected_tickers:
-            target_shares = target_value / price
-        else:
+        if ticker not in selected_tickers:
             target_shares = 0.0
+        elif position_limit_mode == "rebalance_market_value":
+            target_shares = min(current_shares, max_position_value / price)
+        else:
+            target_shares = current_shares
 
         shares_to_sell = current_shares - target_shares
 
@@ -214,11 +260,16 @@ def rebalance_portfolio(
         if holdings.get(ticker, 0.0) <= 0.000001:
             holdings.pop(ticker, None)
 
-    # Buy new positions and increase underweight selected positions.
+    # Buy or top up in rank order. There is no fixed position count.
     for ticker in selected_tickers:
-        price = trade_prices[ticker]
+        price = trade_prices.get(ticker)
+        if price is None:
+            continue
         current_shares = holdings.get(ticker, 0.0)
-        target_shares = target_value / price
+        current_value = current_shares * price
+        if current_value >= max_position_value:
+            continue
+        target_shares = max_position_value / price
         shares_to_buy = target_shares - current_shares
 
         if shares_to_buy <= 0.000001:
@@ -270,10 +321,13 @@ def run_backtest(
     start_date=BACKTEST_START_DATE,
     end_date=BACKTEST_END_DATE,
     starting_cash=BACKTEST_STARTING_CASH,
-    max_positions=BACKTEST_MAX_POSITIONS,
     benchmark=BACKTEST_BENCHMARK,
     fee_rate=BACKTEST_FEE_RATE,
+    min_stock_price=MIN_STOCK_PRICE,
+    max_position_value=MAX_POSITION_VALUE,
+    position_limit_mode=POSITION_LIMIT_MODE,
     status_callback=None,
+    phase_callback=None,
 ):
     """Run the weekly portfolio simulation and return its records."""
     start_date = pd.Timestamp(start_date)
@@ -284,13 +338,22 @@ def run_backtest(
         raise ValueError("Start date must be before end date.")
     if starting_cash <= 0:
         raise ValueError("Starting cash must be positive.")
-    if max_positions < 1:
-        raise ValueError("Maximum positions must be at least 1.")
     if not benchmark:
         raise ValueError("Benchmark ticker cannot be empty.")
     if fee_rate < 0:
         raise ValueError("Transaction fee / slippage cannot be negative.")
+    if min_stock_price < 0:
+        raise ValueError("Minimum stock price cannot be negative.")
+    if max_position_value <= 0:
+        raise ValueError("Maximum initial allocation must be positive.")
+    if position_limit_mode not in {
+        "initial_allocation",
+        "rebalance_market_value",
+    }:
+        raise ValueError("Unknown position-limit mode.")
 
+    if phase_callback:
+        phase_callback("Loading market data...")
     downloaded_data, cache_report = download_backtest_data(
         start_date,
         end_date,
@@ -300,7 +363,20 @@ def run_backtest(
     benchmark_data = get_ticker_data(downloaded_data, benchmark)
 
     if benchmark_data is None:
-        raise ValueError("Benchmark data could not be downloaded.")
+        benchmark_failures = [
+            failure
+            for failure in cache_report.get("Data Source Failures", [])
+            if failure.get("Ticker") == benchmark
+        ]
+        reason = (
+            benchmark_failures[0].get("Reason")
+            if benchmark_failures
+            else "no cached or provider rows were returned"
+        )
+        raise RuntimeError(
+            f"{benchmark} benchmark data unavailable for "
+            f"{start_date.date()} through {end_date.date()}: {reason}"
+        )
 
     simulation_dates = benchmark_data.loc[
         (benchmark_data.index >= start_date)
@@ -323,6 +399,9 @@ def run_backtest(
     portfolio_history = []
     previous_week = None
 
+    if phase_callback:
+        phase_callback("Running simulation...")
+
     for date in simulation_dates:
         week = (date.isocalendar().year, date.isocalendar().week)
 
@@ -331,8 +410,8 @@ def run_backtest(
             selected_stocks = rank_buy_candidates(
                 downloaded_data,
                 date,
-                max_positions,
                 universe=universe_snapshot.tickers,
+                min_stock_price=min_stock_price,
             )
             cash = rebalance_portfolio(
                 downloaded_data,
@@ -342,6 +421,8 @@ def run_backtest(
                 holdings,
                 trades,
                 fee_rate,
+                max_position_value=max_position_value,
+                position_limit_mode=position_limit_mode,
             )
             previous_week = week
 
@@ -378,11 +459,13 @@ def run_backtest(
                 "Ticker": ticker,
                 "Shares": shares,
                 "Final Price": final_price,
-                "Market Value": shares * final_price,
+                "Market Value": (
+                    shares * final_price if final_price is not None else None
+                ),
             }
         )
 
-    return {
+    results = {
         "Start Date": first_date,
         "End Date": last_date,
         "Benchmark": benchmark,
@@ -404,6 +487,9 @@ def run_backtest(
             }
         ),
     }
+    if phase_callback:
+        phase_callback("Complete")
+    return results
 
 
 def display_backtest_results(results):
@@ -423,6 +509,14 @@ def display_backtest_results(results):
     )
     print(f"Number of trades: {len(results['Trades'])}")
     print(f"Market data: {results['Market Data Cache']['Status']}")
+    unavailable = results["Market Data Cache"].get(
+        "Unavailable Valid Constituents", []
+    )
+    if unavailable:
+        print(
+            f"WARNING: Historical data unavailable for {len(unavailable)} "
+            f"valid constituents: {', '.join(unavailable)}"
+        )
     print("Historical universe: APPROXIMATE")
     print()
     print("Important limitation: this uses today's test universe, which creates")

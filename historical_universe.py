@@ -138,3 +138,29 @@ def get_backtest_tickers(start_date, end_date):
         if start_date < snapshot.effective_date <= end_date
     )
     return sorted({ticker for snapshot in active for ticker in snapshot.tickers})
+
+
+def get_membership_ranges(start_date, end_date):
+    """Map each constituent to inclusive ranges in which it was a member."""
+    start_date = pd.Timestamp(start_date).normalize()
+    end_date = pd.Timestamp(end_date).normalize()
+    active_snapshots = [get_historical_universe(start_date)]
+    active_snapshots.extend(
+        snapshot
+        for snapshot in HISTORICAL_NASDAQ_100_SNAPSHOTS
+        if start_date < snapshot.effective_date <= end_date
+    )
+    ranges = {}
+    for position, snapshot in enumerate(active_snapshots):
+        range_start = max(start_date, snapshot.effective_date)
+        if position + 1 < len(active_snapshots):
+            range_end = active_snapshots[position + 1].effective_date - pd.Timedelta(days=1)
+        else:
+            range_end = end_date
+        for ticker in snapshot.tickers:
+            ticker_ranges = ranges.setdefault(ticker, [])
+            if ticker_ranges and ticker_ranges[-1][1] + pd.Timedelta(days=1) == range_start:
+                ticker_ranges[-1] = (ticker_ranges[-1][0], range_end)
+            else:
+                ticker_ranges.append((range_start, range_end))
+    return ranges
