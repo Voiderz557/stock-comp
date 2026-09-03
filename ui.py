@@ -84,13 +84,13 @@ def show_dashboard(
     )
     draw_card(
         panels["momentum_5d"],
-        "5-Day Momentum",
+        f"{SHORT_MOMENTUM_DAYS}-Day Momentum",
         f"{momentum_5d * 100:+.2f}%",
         "#16833b" if momentum_5d >= 0 else "#b3261e",
     )
     draw_card(
         panels["momentum_20d"],
-        "20-Day Momentum",
+        f"{LONG_MOMENTUM_DAYS}-Day Momentum",
         f"{momentum_20d * 100:+.2f}%",
         "#16833b" if momentum_20d >= 0 else "#b3261e",
     )
@@ -109,7 +109,7 @@ def show_dashboard(
     panels["main_chart"].plot(
         data.index,
         moving_average_line,
-        label="20-Day Moving Average",
+        label=f"{MOVING_AVERAGE_DAYS}-Day Moving Average",
         color="#ff7f0e",
         linewidth=1.6,
     )

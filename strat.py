@@ -4,12 +4,6 @@ from config import (
     SHORT_MOMENTUM_DAYS,
 )
 
-def calculate_returns(data, days):
-    current_price = data["Close"].iloc[-1]
-    old_price = data["Close"].iloc[-days]
-    stock_return = (current_price - old_price) / old_price
-    return stock_return
-
 def calculate_momentum(data):
     closing_prices = data["Close"]
     required_days = LONG_MOMENTUM_DAYS + 1
@@ -37,9 +31,9 @@ def calculate_moving_average(data, days):
 def generate_signal(data):
     momentum_5d, momentum_20d = calculate_momentum(data)
     current_price, moving_average = calculate_moving_average(
-    data,
-    MOVING_AVERAGE_DAYS,
-)
+        data,
+        MOVING_AVERAGE_DAYS,
+    )
 
     score = 0
 
