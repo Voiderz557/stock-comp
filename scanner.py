@@ -1,6 +1,13 @@
 import yfinance as yf
-from config import DATA_PERIOD, MOVING_AVERAGE_DAYS
-from config import DATA_PERIOD
+
+from config import (
+    DATA_PERIOD,
+    LONG_MOMENTUM_DAYS,
+    MOVING_AVERAGE_DAYS,
+    SCANNER_RESULT_LIMIT,
+    SHORT_MOMENTUM_DAYS,
+    STOCK_UNIVERSE,
+)
 from strat import (
     calculate_momentum,
     calculate_moving_average,
@@ -8,23 +15,47 @@ from strat import (
 )
 
 
-def analyze_stock(ticker):
-    data = yf.Ticker(ticker).history(period=DATA_PERIOD)
+def download_stock_data():
+    """Download the whole configured universe in one batch."""
+    print(f"Downloading data for {len(STOCK_UNIVERSE)} stocks...")
 
-    if data.empty:
+    try:
+        return yf.download(
+            tickers=STOCK_UNIVERSE,
+            period=DATA_PERIOD,
+            group_by="ticker",
+            auto_adjust=True,
+            threads=True,
+            progress=False,
+        )
+    except Exception as error:
+        print(f"Stock download failed: {error}")
+        return None
+
+
+def analyze_stock(ticker, data):
+    """Analyze one stock using data from the batch download."""
+    data = data.dropna(subset=["Close"])
+
+    required_rows = max(
+        LONG_MOMENTUM_DAYS + 1,
+        MOVING_AVERAGE_DAYS,
+    )
+
+    if len(data) < required_rows:
         return None
 
     try:
         short_momentum, long_momentum = calculate_momentum(data)
         current_price, moving_average = calculate_moving_average(
-    data,
-    MOVING_AVERAGE_DAYS,
-)
+            data,
+            MOVING_AVERAGE_DAYS,
+        )
         signal, score = generate_signal(data)
-    except ValueError:
+    except (KeyError, ValueError):
         return None
 
-    result = {
+    return {
         "Ticker": ticker,
         "Price": current_price,
         "Short Momentum": short_momentum,
@@ -34,4 +65,78 @@ def analyze_stock(ticker):
         "Score": score,
     }
 
-    return result
+
+def scan_stocks():
+    """Analyze every configured ticker and rank the valid results."""
+    downloaded_data = download_stock_data()
+
+    if downloaded_data is None or downloaded_data.empty:
+        return []
+
+    results = []
+    available_tickers = downloaded_data.columns.get_level_values(0)
+
+    for ticker in STOCK_UNIVERSE:
+        if ticker not in available_tickers:
+            print(f"Skipping {ticker}: no downloaded data")
+            continue
+
+        ticker_data = downloaded_data[ticker].copy()
+        result = analyze_stock(ticker, ticker_data)
+
+        if result is not None:
+            results.append(result)
+        else:
+            print(f"Skipping {ticker}: insufficient or invalid data")
+
+    results.sort(
+        key=lambda stock: (
+            stock["Score"],
+            stock["Long Momentum"],
+        ),
+        reverse=True,
+    )
+
+    return results
+
+
+def display_results(results):
+    """Print the highest-ranked scanner results as a leaderboard."""
+    if not results:
+        print("No valid stocks were found.")
+        return
+
+    displayed_results = results[:SCANNER_RESULT_LIMIT]
+    short_label = f"{SHORT_MOMENTUM_DAYS}D MOM"
+    long_label = f"{LONG_MOMENTUM_DAYS}D MOM"
+
+    print()
+    print(
+        f"STOCK LEADERBOARD - showing {len(displayed_results)} "
+        f"of {len(results)} valid stocks"
+    )
+
+    header = (
+        f"{'RANK':<5} | {'TICKER':<6} | {'SCORE':<5} | "
+        f"{'SIGNAL':<6} | {'PRICE':>10} | "
+        f"{short_label:>9} | {long_label:>9}"
+    )
+
+    print(header)
+    print("-" * len(header))
+
+    for rank, stock in enumerate(displayed_results, start=1):
+        print(
+            f"{rank:<5} | "
+            f"{stock['Ticker']:<6} | "
+            f"{str(stock['Score']) + '/3':<5} | "
+            f"{stock['Signal']:<6} | "
+            f"${stock['Price']:>9,.2f} | "
+            f"{stock['Short Momentum'] * 100:>+8.2f}% | "
+            f"{stock['Long Momentum'] * 100:>+8.2f}%"
+        )
+
+
+if __name__ == "__main__":
+    ranked_stocks = scan_stocks()
+    display_results(ranked_stocks)
