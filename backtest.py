@@ -1,5 +1,4 @@
 import pandas as pd
-import yfinance as yf
 
 from config import (
     BACKTEST_BENCHMARK,
@@ -10,45 +9,57 @@ from config import (
     BACKTEST_STARTING_CASH,
     LONG_MOMENTUM_DAYS,
     MOVING_AVERAGE_DAYS,
-    STOCK_UNIVERSE,
 )
+from historical_universe import (
+    UNIVERSE_SOURCE,
+    get_backtest_tickers,
+    get_historical_universe,
+)
+from market_data import load_market_data
 from scanner import analyze_stock
 
 
-def download_backtest_data():
+def download_backtest_data(
+    start_date,
+    end_date,
+    benchmark,
+    status_callback=None,
+):
     """Download the universe, benchmark, and indicator warm-up history."""
-    start_date = pd.Timestamp(BACKTEST_START_DATE)
-    end_date = pd.Timestamp(BACKTEST_END_DATE)
-
-    if start_date >= end_date:
-        raise ValueError("Backtest start date must be before the end date.")
-
     required_days = max(
         LONG_MOMENTUM_DAYS + 1,
         MOVING_AVERAGE_DAYS,
     )
     warmup_start = start_date - pd.Timedelta(days=required_days * 3)
 
-    tickers = list(STOCK_UNIVERSE)
-    if BACKTEST_BENCHMARK not in tickers:
-        tickers.append(BACKTEST_BENCHMARK)
+    tickers = get_backtest_tickers(start_date, end_date)
+    if benchmark not in tickers:
+        tickers.append(benchmark)
 
-    print(f"Downloading historical data for {len(tickers)} symbols...")
+    try:
+        downloaded_data, cache_report = load_market_data(
+            tickers,
+            warmup_start,
+            end_date,
+            status_callback=status_callback,
+        )
+    except Exception as error:
+        raise RuntimeError("Market data could not be loaded.") from error
 
-    return yf.download(
-        tickers=tickers,
-        start=warmup_start.strftime("%Y-%m-%d"),
-        # yfinance treats end as exclusive, so include one extra calendar day.
-        end=(end_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-        group_by="ticker",
-        auto_adjust=True,
-        threads=True,
-        progress=False,
-    )
+    if not any(not frame.empty for frame in downloaded_data.values()):
+        raise RuntimeError("The market data loader returned no results.")
+
+    return downloaded_data, cache_report
 
 
 def get_ticker_data(downloaded_data, ticker):
     """Extract one ticker's rows from the batch download."""
+    if isinstance(downloaded_data, dict):
+        ticker_data = downloaded_data.get(ticker)
+        if ticker_data is None or ticker_data.empty:
+            return None
+        return ticker_data.copy()
+
     available_tickers = downloaded_data.columns.get_level_values(0)
 
     if ticker not in available_tickers:
@@ -89,11 +100,19 @@ def get_valuation_price(ticker_data, date):
     return float(known_closes.iloc[-1])
 
 
-def rank_buy_candidates(downloaded_data, rebalance_date):
+def rank_buy_candidates(
+    downloaded_data,
+    rebalance_date,
+    max_positions,
+    universe=None,
+):
     """Rank BUY stocks using information known before the trading day."""
     candidates = []
 
-    for ticker in STOCK_UNIVERSE:
+    if universe is None:
+        universe = get_historical_universe(rebalance_date).tickers
+
+    for ticker in universe:
         ticker_data = get_ticker_data(downloaded_data, ticker)
 
         if ticker_data is None:
@@ -123,7 +142,7 @@ def rank_buy_candidates(downloaded_data, rebalance_date):
         reverse=True,
     )
 
-    return candidates[:BACKTEST_MAX_POSITIONS]
+    return candidates[:max_positions]
 
 
 def rebalance_portfolio(
@@ -133,6 +152,7 @@ def rebalance_portfolio(
     cash,
     holdings,
     trades,
+    fee_rate,
 ):
     """Rebalance selected stocks to equal weights at the day's Open."""
     selected_tickers = [stock["Ticker"] for stock in selected_stocks]
@@ -177,7 +197,7 @@ def rebalance_portfolio(
 
         if shares_to_sell > 0.000001:
             proceeds = shares_to_sell * price
-            fee = proceeds * BACKTEST_FEE_RATE
+            fee = proceeds * fee_rate
             cash += proceeds - fee
             holdings[ticker] = target_shares
             trades.append(
@@ -204,14 +224,14 @@ def rebalance_portfolio(
         if shares_to_buy <= 0.000001:
             continue
 
-        maximum_affordable = cash / (price * (1 + BACKTEST_FEE_RATE))
+        maximum_affordable = cash / (price * (1 + fee_rate))
         shares_to_buy = min(shares_to_buy, maximum_affordable)
 
         if shares_to_buy <= 0.000001:
             continue
 
         cost = shares_to_buy * price
-        fee = cost * BACKTEST_FEE_RATE
+        fee = cost * fee_rate
         cash -= cost + fee
         holdings[ticker] = current_shares + shares_to_buy
         trades.append(
@@ -246,16 +266,42 @@ def calculate_portfolio_value(downloaded_data, date, cash, holdings):
     return total_value
 
 
-def run_backtest():
+def run_backtest(
+    start_date=BACKTEST_START_DATE,
+    end_date=BACKTEST_END_DATE,
+    starting_cash=BACKTEST_STARTING_CASH,
+    max_positions=BACKTEST_MAX_POSITIONS,
+    benchmark=BACKTEST_BENCHMARK,
+    fee_rate=BACKTEST_FEE_RATE,
+    status_callback=None,
+):
     """Run the weekly portfolio simulation and return its records."""
-    downloaded_data = download_backtest_data()
-    benchmark_data = get_ticker_data(downloaded_data, BACKTEST_BENCHMARK)
+    start_date = pd.Timestamp(start_date)
+    end_date = pd.Timestamp(end_date)
+    benchmark = benchmark.strip().upper()
+
+    if start_date >= end_date:
+        raise ValueError("Start date must be before end date.")
+    if starting_cash <= 0:
+        raise ValueError("Starting cash must be positive.")
+    if max_positions < 1:
+        raise ValueError("Maximum positions must be at least 1.")
+    if not benchmark:
+        raise ValueError("Benchmark ticker cannot be empty.")
+    if fee_rate < 0:
+        raise ValueError("Transaction fee / slippage cannot be negative.")
+
+    downloaded_data, cache_report = download_backtest_data(
+        start_date,
+        end_date,
+        benchmark,
+        status_callback=status_callback,
+    )
+    benchmark_data = get_ticker_data(downloaded_data, benchmark)
 
     if benchmark_data is None:
         raise ValueError("Benchmark data could not be downloaded.")
 
-    start_date = pd.Timestamp(BACKTEST_START_DATE)
-    end_date = pd.Timestamp(BACKTEST_END_DATE)
     simulation_dates = benchmark_data.loc[
         (benchmark_data.index >= start_date)
         & (benchmark_data.index <= end_date)
@@ -264,7 +310,14 @@ def run_backtest():
     if simulation_dates.empty:
         raise ValueError("No trading dates exist in the configured range.")
 
-    cash = BACKTEST_STARTING_CASH
+    first_date = simulation_dates[0]
+    last_date = simulation_dates[-1]
+    benchmark_start = get_trade_price(benchmark_data, first_date)
+
+    if benchmark_start is None:
+        raise ValueError("Benchmark has no valid opening price on the start date.")
+
+    cash = float(starting_cash)
     holdings = {}
     trades = []
     portfolio_history = []
@@ -274,7 +327,13 @@ def run_backtest():
         week = (date.isocalendar().year, date.isocalendar().week)
 
         if week != previous_week:
-            selected_stocks = rank_buy_candidates(downloaded_data, date)
+            universe_snapshot = get_historical_universe(date)
+            selected_stocks = rank_buy_candidates(
+                downloaded_data,
+                date,
+                max_positions,
+                universe=universe_snapshot.tickers,
+            )
             cash = rebalance_portfolio(
                 downloaded_data,
                 date,
@@ -282,6 +341,7 @@ def run_backtest():
                 cash,
                 holdings,
                 trades,
+                fee_rate,
             )
             previous_week = week
 
@@ -291,32 +351,58 @@ def run_backtest():
             cash,
             holdings,
         )
+        benchmark_price = get_valuation_price(benchmark_data, date)
+        benchmark_value = starting_cash * benchmark_price / benchmark_start
         portfolio_history.append(
             {
                 "Date": date,
                 "Portfolio Value": portfolio_value,
+                "Benchmark Value": benchmark_value,
                 "Cash": cash,
                 "Holdings": holdings.copy(),
             }
         )
 
-    first_date = simulation_dates[0]
-    last_date = simulation_dates[-1]
-    benchmark_start = get_trade_price(benchmark_data, first_date)
     benchmark_end = get_valuation_price(benchmark_data, last_date)
     benchmark_return = benchmark_end / benchmark_start - 1
 
     ending_value = portfolio_history[-1]["Portfolio Value"]
-    total_return = ending_value / BACKTEST_STARTING_CASH - 1
+    total_return = ending_value / starting_cash - 1
+
+    final_holdings = []
+    for ticker, shares in holdings.items():
+        ticker_data = get_ticker_data(downloaded_data, ticker)
+        final_price = get_valuation_price(ticker_data, last_date)
+        final_holdings.append(
+            {
+                "Ticker": ticker,
+                "Shares": shares,
+                "Final Price": final_price,
+                "Market Value": shares * final_price,
+            }
+        )
 
     return {
-        "Starting Value": BACKTEST_STARTING_CASH,
+        "Start Date": first_date,
+        "End Date": last_date,
+        "Benchmark": benchmark,
+        "Starting Value": starting_cash,
         "Ending Value": ending_value,
         "Total Return": total_return,
         "Benchmark Return": benchmark_return,
         "Portfolio History": portfolio_history,
         "Holdings": holdings,
+        "Final Holdings": final_holdings,
         "Trades": trades,
+        "Market Data Cache": cache_report,
+        "Universe Approximate": True,
+        "Universe Source": UNIVERSE_SOURCE,
+        "Universe Snapshot Dates": sorted(
+            {
+                get_historical_universe(date).effective_date
+                for date in simulation_dates
+            }
+        ),
     }
 
 
@@ -324,18 +410,24 @@ def display_backtest_results(results):
     """Print the required Version 1 summary."""
     print()
     print("BACKTEST VERSION 1")
-    print(f"Period: {BACKTEST_START_DATE} to {BACKTEST_END_DATE}")
+    print(
+        f"Period: {results['Start Date'].date()} "
+        f"to {results['End Date'].date()}"
+    )
     print(f"Starting value: ${results['Starting Value']:,.2f}")
     print(f"Ending value:   ${results['Ending Value']:,.2f}")
     print(f"Total return:   {results['Total Return']:+.2%}")
     print(
-        f"{BACKTEST_BENCHMARK} return: "
+        f"{results['Benchmark']} return: "
         f"{results['Benchmark Return']:+.2%}"
     )
     print(f"Number of trades: {len(results['Trades'])}")
+    print(f"Market data: {results['Market Data Cache']['Status']}")
+    print("Historical universe: APPROXIMATE")
     print()
     print("Important limitation: this uses today's test universe, which creates")
     print("survivorship bias when testing historical periods.")
+    print(results["Universe Source"])
 
 
 if __name__ == "__main__":
