@@ -6,20 +6,21 @@ from config import (
     BACKTEST_FEE_RATE,
     BACKTEST_START_DATE,
     BACKTEST_STARTING_CASH,
+    DEFAULT_STRATEGY_NAME,
     LONG_MOMENTUM_DAYS,
     MAX_POSITION_VALUE,
     MIN_STOCK_PRICE,
     MOVING_AVERAGE_DAYS,
     POSITION_LIMIT_MODE,
 )
-from historical_universe import (
+from data.historical_universe import (
     UNIVERSE_SOURCE,
     get_backtest_tickers,
     get_historical_universe,
     get_membership_ranges,
 )
-from market_data import load_market_data
-from scanner import analyze_stock
+from data.market_data import load_market_data
+from strategies.registry import get_strategy
 
 
 def download_backtest_data(
@@ -155,12 +156,15 @@ def rank_buy_candidates(
     rebalance_date,
     universe=None,
     min_stock_price=MIN_STOCK_PRICE,
+    strategy=None,
 ):
     """Rank BUY stocks using information known before the trading day."""
     candidates = []
 
     if universe is None:
         universe = get_historical_universe(rebalance_date).tickers
+    if strategy is None:
+        strategy = get_strategy(DEFAULT_STRATEGY_NAME)
 
     for ticker in universe:
         ticker_data = get_ticker_data(downloaded_data, ticker)
@@ -180,18 +184,12 @@ def rank_buy_candidates(
             ticker_data.index < rebalance_date
         ].copy()
 
-        result = analyze_stock(ticker, historical_data)
+        result = strategy.analyze(ticker, historical_data)
 
         if result is not None and result["Signal"] == "BUY":
             candidates.append(result)
 
-    candidates.sort(
-        key=lambda stock: (
-            stock["Score"],
-            stock["Long Momentum"],
-        ),
-        reverse=True,
-    )
+    candidates.sort(key=strategy.rank_key, reverse=True)
 
     return candidates
 
@@ -328,11 +326,13 @@ def run_backtest(
     position_limit_mode=POSITION_LIMIT_MODE,
     status_callback=None,
     phase_callback=None,
+    strategy_name=DEFAULT_STRATEGY_NAME,
 ):
     """Run the weekly portfolio simulation and return its records."""
     start_date = pd.Timestamp(start_date)
     end_date = pd.Timestamp(end_date)
     benchmark = benchmark.strip().upper()
+    strategy = get_strategy(strategy_name)
 
     if start_date >= end_date:
         raise ValueError("Start date must be before end date.")
@@ -412,6 +412,7 @@ def run_backtest(
                 date,
                 universe=universe_snapshot.tickers,
                 min_stock_price=min_stock_price,
+                strategy=strategy,
             )
             cash = rebalance_portfolio(
                 downloaded_data,
@@ -466,6 +467,7 @@ def run_backtest(
         )
 
     results = {
+        "Algorithm": strategy.name,
         "Start Date": first_date,
         "End Date": last_date,
         "Benchmark": benchmark,

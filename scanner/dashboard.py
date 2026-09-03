@@ -1,3 +1,5 @@
+"""Matplotlib dashboard for the interactive single-stock scanner."""
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker

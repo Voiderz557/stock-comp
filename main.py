@@ -2,12 +2,12 @@ import yfinance as yf
 from config import DATA_PERIOD, DEFAULT_TICKER, MOVING_AVERAGE_DAYS
 
 # Import calculations from the strategy file
-from strat import (
+from strategies.baseline import (
     calculate_momentum,
     calculate_moving_average,
     generate_signal,
 )
-from ui import show_dashboard
+from scanner.dashboard import show_dashboard
 
 
 # Ask the user which stock to examine

@@ -3,16 +3,11 @@ import yfinance as yf
 from config import (
     DATA_PERIOD,
     LONG_MOMENTUM_DAYS,
-    MOVING_AVERAGE_DAYS,
     SCANNER_RESULT_LIMIT,
     SHORT_MOMENTUM_DAYS,
     STOCK_UNIVERSE,
 )
-from strat import (
-    calculate_momentum,
-    calculate_moving_average,
-    generate_signal,
-)
+from strategies.registry import get_strategy
 
 
 def download_stock_data():
@@ -34,36 +29,8 @@ def download_stock_data():
 
 
 def analyze_stock(ticker, data):
-    """Analyze one stock using data from the batch download."""
-    data = data.dropna(subset=["Close"])
-
-    required_rows = max(
-        LONG_MOMENTUM_DAYS + 1,
-        MOVING_AVERAGE_DAYS,
-    )
-
-    if len(data) < required_rows:
-        return None
-
-    try:
-        short_momentum, long_momentum = calculate_momentum(data)
-        current_price, moving_average = calculate_moving_average(
-            data,
-            MOVING_AVERAGE_DAYS,
-        )
-        signal, score = generate_signal(data)
-    except (KeyError, ValueError):
-        return None
-
-    return {
-        "Ticker": ticker,
-        "Price": current_price,
-        "Short Momentum": short_momentum,
-        "Long Momentum": long_momentum,
-        "Moving Average": moving_average,
-        "Signal": signal,
-        "Score": score,
-    }
+    """Analyze one stock with the configured scanner strategy."""
+    return get_strategy("Baseline").analyze(ticker, data)
 
 
 def scan_stocks():
@@ -89,13 +56,7 @@ def scan_stocks():
         else:
             print(f"Skipping {ticker}: insufficient or invalid data")
 
-    results.sort(
-        key=lambda stock: (
-            stock["Score"],
-            stock["Long Momentum"],
-        ),
-        reverse=True,
-    )
+    results.sort(key=get_strategy("Baseline").rank_key, reverse=True)
 
     return results
 

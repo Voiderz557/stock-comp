@@ -2,20 +2,21 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
 
-from backtest import (
+from backtesting.engine import (
     download_backtest_data,
     rank_buy_candidates,
     rebalance_portfolio,
     run_backtest,
 )
-from backtest_periods import generate_random_periods
-from historical_universe import get_historical_universe
-from market_data import LocalParquetProvider, load_market_data
-from ticker_history import (
+from backtesting.periods import generate_random_periods
+from data.historical_universe import get_historical_universe
+from data.market_data import LocalParquetProvider, load_market_data
+from data.ticker_history import (
     DELISTED_LATER,
     MISSING_FROM_PROVIDER,
     NOT_PUBLIC_YET,
@@ -85,7 +86,7 @@ class CacheTests(unittest.TestCase):
     def test_full_cache_hit_does_not_download(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
             with patch(
-                "market_data._download_range",
+                "data.market_data._download_range",
                 return_value=cache_frame("2025-01-01", "2025-01-10"),
             ) as download:
                 _, first = load_market_data(
@@ -107,7 +108,7 @@ class CacheTests(unittest.TestCase):
             return cache_frame(start, end - pd.Timedelta(days=1))
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
-            with patch("market_data._download_range", side_effect=fake_download):
+            with patch("data.market_data._download_range", side_effect=fake_download):
                 load_market_data(
                     ["AAPL"], "2025-01-01", "2025-01-10", cache_dir=cache_dir
                 )
@@ -129,7 +130,7 @@ class CacheTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
             with patch(
-                "market_data._download_range",
+                "data.market_data._download_range",
                 return_value=pd.DataFrame(),
             ):
                 data, report = load_market_data(
@@ -153,7 +154,7 @@ class CacheTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
             with patch(
-                "market_data._download_range", return_value=pd.DataFrame()
+                "data.market_data._download_range", return_value=pd.DataFrame()
             ) as download:
                 load_market_data(
                     ["SPLK"],
@@ -181,7 +182,7 @@ class CacheTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
             with patch(
-                "market_data._download_range", return_value=pd.DataFrame()
+                "data.market_data._download_range", return_value=pd.DataFrame()
             ) as download:
                 load_market_data(
                     ["SPLK"],
@@ -209,8 +210,10 @@ class CacheTests(unittest.TestCase):
             return pd.DataFrame()
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
-            with patch("market_data._download_range", side_effect=slow_download), patch(
-                "market_data.YFINANCE_HARD_TIMEOUT_SECONDS", 0.01
+            with patch(
+                "data.market_data._download_range", side_effect=slow_download
+            ), patch(
+                "data.market_data.YFINANCE_HARD_TIMEOUT_SECONDS", 0.01
             ):
                 _, report = load_market_data(
                     ["EA"],
@@ -237,7 +240,7 @@ class CacheTests(unittest.TestCase):
             )
             provider = LocalParquetProvider(manual_dir)
             with patch(
-                "market_data._download_range",
+                "data.market_data._download_range",
                 return_value=pd.DataFrame(),
             ):
                 data, report = load_market_data(
@@ -283,7 +286,7 @@ class BenchmarkIsolationTests(unittest.TestCase):
             ]
         }
         with patch(
-            "backtest.load_market_data",
+            "backtesting.engine.load_market_data",
             return_value=({"SPY": pd.DataFrame()}, report),
         ) as loader:
             with self.assertRaisesRegex(
@@ -310,8 +313,9 @@ class BenchmarkIsolationTests(unittest.TestCase):
         }
         phases = []
         with patch(
-            "backtest.download_backtest_data", return_value=({"SPY": spy}, report)
-        ), patch("backtest.rank_buy_candidates", return_value=[]):
+            "backtesting.engine.download_backtest_data",
+            return_value=({"SPY": spy}, report),
+        ), patch("backtesting.engine.rank_buy_candidates", return_value=[]):
             result = run_backtest(
                 "2025-01-06",
                 "2025-01-10",
@@ -330,7 +334,7 @@ class BenchmarkIsolationTests(unittest.TestCase):
             ]
         }
         with patch(
-            "backtest.download_backtest_data",
+            "backtesting.engine.download_backtest_data",
             return_value=({"SPY": pd.DataFrame()}, report),
         ):
             with self.assertRaisesRegex(
@@ -353,13 +357,17 @@ class PortfolioRuleTests(unittest.TestCase):
                 "Long Momentum": 1,
             }
 
-        with patch("backtest.analyze_stock", side_effect=signal):
-            ranked = rank_buy_candidates(
-                data,
-                pd.Timestamp("2025-01-06"),
-                universe=["A", "B", "C"],
-                min_stock_price=5.0,
-            )
+        strategy = SimpleNamespace(
+            analyze=signal,
+            rank_key=lambda result: (result["Score"], result["Long Momentum"]),
+        )
+        ranked = rank_buy_candidates(
+            data,
+            pd.Timestamp("2025-01-06"),
+            universe=["A", "B", "C"],
+            min_stock_price=5.0,
+            strategy=strategy,
+        )
         self.assertEqual([item["Ticker"] for item in ranked], ["A", "C"])
 
     def test_allocates_down_ranking_and_skips_missing_ticker(self):

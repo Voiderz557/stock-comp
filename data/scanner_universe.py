@@ -1,4 +1,4 @@
-"""Temporary liquid stock universes used by the scanner."""
+"""Current liquid stock universes used by the scanner only."""
 
 
 # Nasdaq-100 test universe, updated for the June 2026 announced changes.

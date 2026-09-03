@@ -1,4 +1,4 @@
-"""Deterministic random test-window generation for the backtest UI."""
+"""Deterministic random test-window generation for backtests."""
 
 import random
 

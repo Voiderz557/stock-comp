@@ -17,7 +17,7 @@ from config import (
     YFINANCE_HARD_TIMEOUT_SECONDS,
     YFINANCE_REQUEST_TIMEOUT_SECONDS,
 )
-from ticker_history import (
+from data.ticker_history import (
     MISSING_FROM_PROVIDER,
     NOT_PUBLIC_YET,
     get_provider_symbol,
