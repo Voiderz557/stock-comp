@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Callable
 
-from . import baseline
+from . import baseline, momentum_v2
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,14 @@ _STRATEGIES = {
         rank_key=baseline.rank_key,
         parameters=baseline.PARAMETERS,
         required_history_days=baseline.REQUIRED_HISTORY_DAYS,
-    )
+    ),
+    "Momentum V2": StrategyDefinition(
+        name="Momentum V2",
+        analyze=momentum_v2.analyze,
+        rank_key=momentum_v2.rank_key,
+        parameters=momentum_v2.PARAMETERS,
+        required_history_days=momentum_v2.REQUIRED_HISTORY_DAYS,
+    ),
 }
 
 
