@@ -37,6 +37,10 @@ class ExportTests(unittest.TestCase):
         result = {
             "Algorithm": "Baseline",
             "Test": 1,
+            "Requested Start": pd.Timestamp("2025-01-01"),
+            "Requested End": pd.Timestamp("2025-02-05"),
+            "Actual Start": pd.Timestamp("2025-01-02"),
+            "Actual End": pd.Timestamp("2025-02-03"),
             "Start Date": pd.Timestamp("2025-01-02"),
             "End Date": pd.Timestamp("2025-02-03"),
             "Total Return": 0.05,
@@ -68,6 +72,12 @@ class ExportTests(unittest.TestCase):
             )
             exported_settings = json.loads(archive.read("settings.json"))
             self.assertEqual(exported_settings["selected_strategies"], ["Baseline"])
+            summary = pd.read_csv(io.BytesIO(archive.read("baseline/summary.csv")))
+            self.assertEqual(summary.loc[0, "Requested Start"], "2025-01-01")
+            self.assertEqual(summary.loc[0, "Actual End"], "2025-02-03")
+            periods = pd.read_csv(io.BytesIO(archive.read("periods.csv")))
+            self.assertEqual(periods.loc[0, "Requested Start"], "2025-01-01")
+            self.assertEqual(periods.loc[0, "Actual End"], "2025-02-03")
 
 
 if __name__ == "__main__":

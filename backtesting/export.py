@@ -12,12 +12,18 @@ import pandas as pd
 def build_test_summary(results):
     rows = []
     for result in results:
+        requested_start = result.get("Requested Start", result["Start Date"])
+        requested_end = result.get("Requested End", result["End Date"])
+        actual_start = result.get("Actual Start", result["Start Date"])
+        actual_end = result.get("Actual End", result["End Date"])
         rows.append(
             {
                 "Algorithm": result["Algorithm"],
                 "Test": result["Test"],
-                "Start": result["Start Date"].date(),
-                "End": result["End Date"].date(),
+                "Requested Start": pd.Timestamp(requested_start).date(),
+                "Requested End": pd.Timestamp(requested_end).date(),
+                "Actual Start": pd.Timestamp(actual_start).date(),
+                "Actual End": pd.Timestamp(actual_end).date(),
                 "Strategy Return": result["Total Return"],
                 "Benchmark Return": result["Benchmark Return"],
                 "Excess Return": (
@@ -81,16 +87,29 @@ def build_complete_backtest_package(results, periods, settings):
     """Return one ZIP containing every completed strategy/test result."""
     package = io.BytesIO()
     comparison = build_comparison_summary(results)
-    period_table = pd.DataFrame(
-        [
+    period_rows = []
+    for index, (start, end) in enumerate(periods, start=1):
+        completed = next(
+            (result for result in results if result.get("Test") == index), None
+        )
+        period_rows.append(
             {
                 "Test": index,
-                "Generated Start": start.date(),
-                "Generated End": end.date(),
+                "Requested Start": start.date(),
+                "Requested End": end.date(),
+                "Actual Start": (
+                    pd.Timestamp(completed["Actual Start"]).date()
+                    if completed and "Actual Start" in completed
+                    else None
+                ),
+                "Actual End": (
+                    pd.Timestamp(completed["Actual End"]).date()
+                    if completed and "Actual End" in completed
+                    else None
+                ),
             }
-            for index, (start, end) in enumerate(periods, start=1)
-        ]
-    )
+        )
+    period_table = pd.DataFrame(period_rows)
 
     with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("comparison_summary.csv", comparison.to_csv(index=False))

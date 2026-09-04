@@ -6,6 +6,7 @@ from config import (
     BACKTEST_FEE_RATE,
     BACKTEST_START_DATE,
     BACKTEST_STARTING_CASH,
+    CACHE_COVERAGE_TOLERANCE_DAYS,
     DEFAULT_STRATEGY_NAME,
     LONG_MOMENTUM_DAYS,
     MAX_POSITION_VALUE,
@@ -21,6 +22,65 @@ from data.historical_universe import (
 )
 from data.market_data import load_market_data
 from strategies.registry import get_strategy
+
+
+def benchmark_coverage_error(
+    benchmark_data,
+    requested_start,
+    requested_end,
+    tolerance_days=CACHE_COVERAGE_TOLERANCE_DAYS,
+):
+    """Describe truncated or discontinuous benchmark data, or return None."""
+    requested_start = pd.Timestamp(requested_start).normalize()
+    requested_end = pd.Timestamp(requested_end).normalize()
+    if benchmark_data is None or benchmark_data.empty:
+        return "no benchmark rows were returned"
+
+    available = benchmark_data.loc[
+        (benchmark_data.index >= requested_start)
+        & (benchmark_data.index <= requested_end)
+    ].copy()
+    price_columns = [
+        column for column in ("Open", "Close") if column in available.columns
+    ]
+    if price_columns:
+        available = available.dropna(subset=price_columns, how="any")
+    if available.empty:
+        return "no valid benchmark rows overlap the requested range"
+
+    dates = available.index.sort_values().unique()
+    first_date = dates[0]
+    last_date = dates[-1]
+    tolerance = pd.Timedelta(days=tolerance_days)
+    problems = []
+    if first_date - requested_start > tolerance:
+        problems.append(
+            f"first row is {first_date.date()} "
+            f"({(first_date - requested_start).days} days after requested start)"
+        )
+    if requested_end - last_date > tolerance:
+        problems.append(
+            f"last row is {last_date.date()} "
+            f"({(requested_end - last_date).days} days before requested end)"
+        )
+    gaps = [
+        (following - previous, previous, following)
+        for previous, following in zip(dates[:-1], dates[1:])
+        if following - previous > tolerance
+    ]
+    if gaps:
+        gap, previous, following = max(gaps, key=lambda item: item[0])
+        problems.append(
+            f"{gap.days}-day gap between {previous.date()} and {following.date()}"
+        )
+    return "; ".join(problems) if problems else None
+
+
+def _benchmark_coverage_failure(benchmark, start_date, end_date, reason):
+    return RuntimeError(
+        f"{benchmark} benchmark coverage is incomplete for "
+        f"{start_date.date()} through {end_date.date()}: {reason}"
+    )
 
 
 def download_backtest_data(
@@ -61,6 +121,31 @@ def download_backtest_data(
             f"{benchmark} benchmark data unavailable for "
             f"{start_date.date()} through {end_date.date()}: {reason}"
         )
+
+    coverage_problem = benchmark_coverage_error(
+        get_ticker_data(benchmark_data, benchmark), start_date, end_date
+    )
+    if coverage_problem:
+        # The cache loader has already checked its manifest against actual
+        # rows. One focused retry gives it a chance to repair just this test's
+        # missing benchmark boundaries/gaps before the test is rejected.
+        retry_data, retry_report = load_market_data(
+            [benchmark],
+            start_date,
+            end_date,
+            status_callback=status_callback,
+            required_ranges={benchmark: [(start_date, end_date)]},
+        )
+        retry_benchmark = get_ticker_data(retry_data, benchmark)
+        retry_problem = benchmark_coverage_error(
+            retry_benchmark, start_date, end_date
+        )
+        if retry_problem:
+            raise _benchmark_coverage_failure(
+                benchmark, start_date, end_date, retry_problem
+            )
+        benchmark_data = retry_data
+        benchmark_report = retry_report
 
     try:
         constituent_data, constituent_report = load_market_data(
@@ -378,6 +463,14 @@ def run_backtest(
             f"{start_date.date()} through {end_date.date()}: {reason}"
         )
 
+    coverage_problem = benchmark_coverage_error(
+        benchmark_data, start_date, end_date
+    )
+    if coverage_problem:
+        raise _benchmark_coverage_failure(
+            benchmark, start_date, end_date, coverage_problem
+        )
+
     simulation_dates = benchmark_data.loc[
         (benchmark_data.index >= start_date)
         & (benchmark_data.index <= end_date)
@@ -468,6 +561,10 @@ def run_backtest(
 
     results = {
         "Algorithm": strategy.name,
+        "Requested Start": start_date,
+        "Requested End": end_date,
+        "Actual Start": first_date,
+        "Actual End": last_date,
         "Start Date": first_date,
         "End Date": last_date,
         "Benchmark": benchmark,

@@ -12,6 +12,7 @@ import pandas as pd
 import yfinance as yf
 
 from config import (
+    CACHE_COVERAGE_TOLERANCE_DAYS,
     MANUAL_HISTORICAL_DATA_DIR,
     MARKET_DATA_CACHE_DIR,
     YFINANCE_HARD_TIMEOUT_SECONDS,
@@ -39,7 +40,7 @@ def _empty_price_frame():
 def _resolve_project_path(path):
     path = Path(path)
     if not path.is_absolute():
-        path = Path(__file__).resolve().parent / path
+        path = Path(__file__).resolve().parents[1] / path
     return path.resolve()
 
 
@@ -50,6 +51,115 @@ def _resolve_cache_dir(cache_dir=None):
 def _cache_path(cache_dir, ticker):
     safe_ticker = ticker.replace("/", "-").replace("\\", "-")
     return Path(cache_dir) / f"{safe_ticker}.parquet"
+
+
+def _merge_ranges(ranges):
+    merged = []
+    for start, end_exclusive in sorted(ranges, key=lambda item: item[0]):
+        if start >= end_exclusive:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end_exclusive))
+        else:
+            merged.append((start, end_exclusive))
+    return merged
+
+
+def _missing_row_ranges(data, start, end_exclusive, tolerance_days=None):
+    """Find boundary truncation and implausibly large holes in cached rows."""
+    tolerance_days = (
+        CACHE_COVERAGE_TOLERANCE_DAYS
+        if tolerance_days is None
+        else tolerance_days
+    )
+    requested = data.loc[(data.index >= start) & (data.index < end_exclusive)]
+    if requested.empty:
+        return [(start, end_exclusive)]
+
+    dates = requested.index.sort_values().unique()
+    missing = []
+    first_date = dates[0]
+    last_date = dates[-1]
+    requested_last = end_exclusive - pd.Timedelta(days=1)
+    tolerance = pd.Timedelta(days=tolerance_days)
+
+    if first_date - start > tolerance:
+        missing.append((start, first_date))
+    if requested_last - last_date > tolerance:
+        missing.append((last_date + pd.Timedelta(days=1), end_exclusive))
+
+    for previous, following in zip(dates[:-1], dates[1:]):
+        if following - previous > tolerance:
+            missing.append((previous + pd.Timedelta(days=1), following))
+    return _merge_ranges(missing)
+
+
+def _required_integrity_ranges(ticker, start, end_exclusive, required_ranges):
+    if required_ranges is None:
+        return [(start, end_exclusive)]
+    ranges = []
+    for required_start, required_end in required_ranges.get(ticker, []):
+        overlap_start = max(start, pd.Timestamp(required_start).normalize())
+        overlap_end = min(
+            end_exclusive,
+            pd.Timestamp(required_end).normalize() + pd.Timedelta(days=1),
+        )
+        if overlap_start < overlap_end:
+            ranges.append((overlap_start, overlap_end))
+    return _merge_ranges(ranges)
+
+
+def _manifest_coverage_from_rows(coverage, cached):
+    """Trim impossible manifest endpoints to the parquet's actual endpoints."""
+    if not coverage or cached.empty:
+        return None
+    try:
+        claimed_start = pd.Timestamp(coverage["start"]).normalize()
+        claimed_end = pd.Timestamp(coverage["end_exclusive"]).normalize()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    actual_start = cached.index.min().normalize()
+    actual_end = cached.index.max().normalize() + pd.Timedelta(days=1)
+    tolerance = pd.Timedelta(days=CACHE_COVERAGE_TOLERANCE_DAYS)
+    repaired_start = (
+        claimed_start
+        if actual_start - claimed_start <= tolerance
+        else actual_start
+    )
+    repaired_end = (
+        claimed_end if claimed_end - actual_end <= tolerance else actual_end
+    )
+    if repaired_start >= repaired_end:
+        return None
+    return {
+        "start": repaired_start.strftime("%Y-%m-%d"),
+        "end_exclusive": repaired_end.strftime("%Y-%m-%d"),
+    }
+
+
+def _cache_fully_covers(
+    ticker, path, coverage, start, end_exclusive, required_ranges
+):
+    if not coverage or not path.exists():
+        return False
+    try:
+        cached = _normalize_download(pd.read_parquet(path), ticker)
+        verified = _manifest_coverage_from_rows(coverage, cached)
+        if not verified:
+            return False
+        if pd.Timestamp(verified["start"]) > start:
+            return False
+        if pd.Timestamp(verified["end_exclusive"]) < end_exclusive:
+            return False
+        return not any(
+            _missing_row_ranges(cached, range_start, range_end)
+            for range_start, range_end in _required_integrity_ranges(
+                ticker, start, end_exclusive, required_ranges
+            )
+        )
+    except Exception:
+        return False
 
 
 def _read_manifest(cache_dir):
@@ -283,15 +393,25 @@ def _load_ticker(
     requested_end = end_exclusive
     cache_error = None
     try:
-        cached = pd.read_parquet(path) if path.exists() else _empty_price_frame()
+        cached = (
+            _normalize_download(pd.read_parquet(path), ticker)
+            if path.exists()
+            else _empty_price_frame()
+        )
     except Exception as error:
         cached = _empty_price_frame()
         cache_error = f"Unreadable cache file: {error}"
-    coverage = (
+    claimed_coverage = (
         manifest.get(ticker)
         if path.exists() and cache_error is None and not cached.empty
         else None
     )
+    coverage = _manifest_coverage_from_rows(claimed_coverage, cached)
+    if coverage != claimed_coverage:
+        if coverage is None:
+            manifest.pop(ticker, None)
+        else:
+            manifest[ticker] = coverage
     if coverage:
         cached_request = cached.loc[
             (cached.index >= requested_start) & (cached.index < requested_end)
@@ -311,6 +431,15 @@ def _load_ticker(
             missing_ranges.append((max(start, covered_end), end_exclusive))
     else:
         missing_ranges.append((start, end_exclusive))
+
+    integrity_ranges = _required_integrity_ranges(
+        ticker, requested_start, requested_end, required_ranges
+    )
+    for integrity_start, integrity_end in integrity_ranges:
+        missing_ranges.extend(
+            _missing_row_ranges(cached, integrity_start, integrity_end)
+        )
+    missing_ranges = _merge_ranges(missing_ranges)
 
     frames = [cached] if not cached.empty else []
     failures = []
@@ -397,6 +526,8 @@ def _load_ticker(
                     _store_failure(failure_cache, failure)
             else:
                 frames.append(fetched)
+                if _missing_row_ranges(fetched, fetch_start, fetch_end):
+                    all_fetches_succeeded = False
 
     if frames:
         combined = pd.concat(frames).sort_index()
@@ -407,7 +538,12 @@ def _load_ticker(
         combined = _empty_price_frame()
 
     downloaded = attempted_yfinance
-    if downloaded and all_fetches_succeeded:
+    remaining_integrity_gaps = [
+        gap
+        for integrity_start, integrity_end in integrity_ranges
+        for gap in _missing_row_ranges(combined, integrity_start, integrity_end)
+    ]
+    if downloaded and all_fetches_succeeded and not remaining_integrity_gaps:
         if coverage:
             start = min(start, pd.Timestamp(coverage["start"]))
             end_exclusive = max(
@@ -417,6 +553,20 @@ def _load_ticker(
             "start": start.strftime("%Y-%m-%d"),
             "end_exclusive": end_exclusive.strftime("%Y-%m-%d"),
         }
+    elif remaining_integrity_gaps:
+        # Keep only endpoint coverage supported by actual rows. Internal holes
+        # are independently rediscovered from the parquet on every cache hit.
+        candidate_coverage = coverage or {
+            "start": requested_start.strftime("%Y-%m-%d"),
+            "end_exclusive": requested_end.strftime("%Y-%m-%d"),
+        }
+        repaired_coverage = _manifest_coverage_from_rows(
+            candidate_coverage, combined
+        )
+        if repaired_coverage:
+            manifest[ticker] = repaired_coverage
+        else:
+            manifest.pop(ticker, None)
 
     requested = combined.loc[
         (combined.index >= requested_start) & (combined.index < requested_end)
@@ -482,11 +632,13 @@ def load_market_data(
 
     for ticker in dict.fromkeys(tickers):
         coverage = manifest.get(ticker)
-        fully_cached = (
-            coverage
-            and pd.Timestamp(coverage["start"]) <= start
-            and pd.Timestamp(coverage["end_exclusive"]) >= end_exclusive
-            and _cache_path(cache_dir, ticker).exists()
+        fully_cached = _cache_fully_covers(
+            ticker,
+            _cache_path(cache_dir, ticker),
+            coverage,
+            start,
+            end_exclusive,
+            required_ranges,
         )
         if status_callback:
             status_callback("USING CACHE" if fully_cached else "DOWNLOADING", ticker)
@@ -539,7 +691,7 @@ def load_market_data(
 def clear_market_data_cache(cache_dir=None):
     """Delete only the configured cache directory and its contents."""
     cache_dir = _resolve_cache_dir(cache_dir)
-    project_dir = Path(__file__).resolve().parent
+    project_dir = Path(__file__).resolve().parents[1]
     if cache_dir == project_dir or project_dir not in cache_dir.parents:
         raise ValueError("Cache directory must be a child of the project directory.")
     if cache_dir.exists():

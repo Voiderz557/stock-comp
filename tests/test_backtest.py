@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 import unittest
@@ -262,6 +263,56 @@ class CacheTests(unittest.TestCase):
             [{"Ticker": "EA", "Source": "LOCAL PARQUET"}],
         )
 
+    def test_stale_manifest_repairs_missing_cached_suffix(self):
+        requested_start = pd.Timestamp("2022-10-22")
+        requested_end = pd.Timestamp("2023-03-22")
+        calls = []
+
+        def fake_download(ticker, start, end_exclusive):
+            calls.append((start, end_exclusive))
+            return cache_frame(start, end_exclusive - pd.Timedelta(days=1))
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
+            cache_dir = Path(cache_dir)
+            cache_frame("2022-10-24", "2023-01-17").to_parquet(
+                cache_dir / "SPY.parquet"
+            )
+            (cache_dir / "coverage.json").write_text(
+                json.dumps(
+                    {
+                        "SPY": {
+                            "start": "2022-10-22",
+                            "end_exclusive": "2023-03-23",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "data.market_data._download_range", side_effect=fake_download
+            ):
+                data, report = load_market_data(
+                    ["SPY"],
+                    requested_start,
+                    requested_end,
+                    cache_dir=cache_dir,
+                    required_ranges={"SPY": [(requested_start, requested_end)]},
+                    secondary_providers=[],
+                )
+            repaired_manifest = json.loads(
+                (cache_dir / "coverage.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            calls,
+            [(pd.Timestamp("2023-01-18"), pd.Timestamp("2023-03-23"))],
+        )
+        self.assertEqual(data["SPY"].index.max(), pd.Timestamp("2023-03-22"))
+        self.assertEqual(
+            repaired_manifest["SPY"]["end_exclusive"], "2023-03-23"
+        )
+        self.assertEqual(report["Status"], "DOWNLOADING")
+
 
 class TickerIdentityTests(unittest.TestCase):
     def test_symbol_change_routes_to_current_provider_symbol(self):
@@ -279,6 +330,18 @@ class TickerIdentityTests(unittest.TestCase):
 
 
 class BenchmarkIsolationTests(unittest.TestCase):
+    @staticmethod
+    def _cache_report():
+        return {
+            "Status": "USING CACHE",
+            "Downloaded Tickers": [],
+            "Cache Directory": "test-cache",
+            "Data Source Failures": [],
+            "Unavailable Valid Constituents": [],
+            "Secondary Sources Used": [],
+            "Ticker Classifications": {},
+        }
+
     def test_missing_benchmark_fails_before_loading_constituents(self):
         report = {
             "Data Source Failures": [
@@ -341,6 +404,65 @@ class BenchmarkIsolationTests(unittest.TestCase):
                 RuntimeError, "SPY benchmark data unavailable.*exceeded 12 seconds"
             ):
                 run_backtest("2025-01-06", "2025-01-10")
+
+    def test_weekend_boundaries_adjust_only_to_nearby_trading_dates(self):
+        spy = cache_frame("2025-01-06", "2025-01-10")
+        with patch(
+            "backtesting.engine.download_backtest_data",
+            return_value=({"SPY": spy}, self._cache_report()),
+        ), patch("backtesting.engine.rank_buy_candidates", return_value=[]):
+            result = run_backtest("2025-01-04", "2025-01-12")
+
+        self.assertEqual(result["Requested Start"], pd.Timestamp("2025-01-04"))
+        self.assertEqual(result["Requested End"], pd.Timestamp("2025-01-12"))
+        self.assertEqual(result["Actual Start"], pd.Timestamp("2025-01-06"))
+        self.assertEqual(result["Actual End"], pd.Timestamp("2025-01-10"))
+
+    def test_missing_beginning_of_benchmark_history_fails_test(self):
+        spy = cache_frame("2025-01-20", "2025-02-28")
+        with patch(
+            "backtesting.engine.download_backtest_data",
+            return_value=({"SPY": spy}, self._cache_report()),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "benchmark coverage is incomplete.*first row"
+            ):
+                run_backtest("2025-01-01", "2025-02-28")
+
+    def test_missing_end_of_benchmark_history_fails_test(self):
+        spy = cache_frame("2025-01-02", "2025-02-03")
+        with patch(
+            "backtesting.engine.download_backtest_data",
+            return_value=({"SPY": spy}, self._cache_report()),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "benchmark coverage is incomplete.*last row"
+            ):
+                run_backtest("2025-01-01", "2025-02-28")
+
+    def test_five_month_period_cannot_become_three_week_simulation(self):
+        spy = cache_frame("2025-06-02", "2025-06-25")
+        with patch(
+            "backtesting.engine.download_backtest_data",
+            return_value=({"SPY": spy}, self._cache_report()),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "benchmark coverage is incomplete"
+            ):
+                run_backtest("2025-01-25", "2025-06-25")
+
+    def test_large_internal_benchmark_gap_fails_test(self):
+        beginning = cache_frame("2025-01-02", "2025-01-17")
+        ending = cache_frame("2025-02-17", "2025-02-28")
+        spy = pd.concat([beginning, ending])
+        with patch(
+            "backtesting.engine.download_backtest_data",
+            return_value=({"SPY": spy}, self._cache_report()),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "benchmark coverage is incomplete.*day gap"
+            ):
+                run_backtest("2025-01-01", "2025-02-28")
 
 
 class PortfolioRuleTests(unittest.TestCase):

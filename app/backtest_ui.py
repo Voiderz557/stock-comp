@@ -376,6 +376,15 @@ if results:
         item for item in algorithm_results if item["Test"] == inspected_test
     )
 
+    st.caption(
+        "Requested period: "
+        f"{pd.Timestamp(result.get('Requested Start', result['Start Date'])).date()} to "
+        f"{pd.Timestamp(result.get('Requested End', result['End Date'])).date()} | "
+        "Actual trading dates: "
+        f"{pd.Timestamp(result.get('Actual Start', result['Start Date'])).date()} to "
+        f"{pd.Timestamp(result.get('Actual End', result['End Date'])).date()}"
+    )
+
     if result["Universe Approximate"]:
         snapshot_dates = ", ".join(
             str(date.date()) for date in result["Universe Snapshot Dates"]
