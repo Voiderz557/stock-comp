@@ -12,6 +12,7 @@ class StrategyDefinition:
     analyze: Callable
     rank_key: Callable
     parameters: dict
+    required_history_days: int
 
 
 _STRATEGIES = {
@@ -20,6 +21,7 @@ _STRATEGIES = {
         analyze=baseline.analyze,
         rank_key=baseline.rank_key,
         parameters=baseline.PARAMETERS,
+        required_history_days=baseline.REQUIRED_HISTORY_DAYS,
     )
 }
 

@@ -8,10 +8,8 @@ from config import (
     BACKTEST_STARTING_CASH,
     CACHE_COVERAGE_TOLERANCE_DAYS,
     DEFAULT_STRATEGY_NAME,
-    LONG_MOMENTUM_DAYS,
     MAX_POSITION_VALUE,
     MIN_STOCK_PRICE,
-    MOVING_AVERAGE_DAYS,
     POSITION_LIMIT_MODE,
 )
 from data.historical_universe import (
@@ -87,14 +85,11 @@ def download_backtest_data(
     start_date,
     end_date,
     benchmark,
+    required_history_days,
     status_callback=None,
 ):
     """Download the universe, benchmark, and indicator warm-up history."""
-    required_days = max(
-        LONG_MOMENTUM_DAYS + 1,
-        MOVING_AVERAGE_DAYS,
-    )
-    warmup_start = start_date - pd.Timedelta(days=required_days * 3)
+    warmup_start = start_date - pd.Timedelta(days=required_history_days * 3)
 
     constituent_tickers = [
         ticker
@@ -443,6 +438,7 @@ def run_backtest(
         start_date,
         end_date,
         benchmark,
+        strategy.required_history_days,
         status_callback=status_callback,
     )
     benchmark_data = get_ticker_data(downloaded_data, benchmark)

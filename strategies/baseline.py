@@ -95,3 +95,5 @@ PARAMETERS = {
     "long_momentum_days": LONG_MOMENTUM_DAYS,
     "moving_average_days": MOVING_AVERAGE_DAYS,
 }
+
+REQUIRED_HISTORY_DAYS = max(LONG_MOMENTUM_DAYS + 1, MOVING_AVERAGE_DAYS)
