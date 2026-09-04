@@ -15,6 +15,7 @@ from backtesting.engine import (
     run_backtest,
 )
 from backtesting.periods import generate_random_periods
+from config import LONG_MOMENTUM_DAYS, MOVING_AVERAGE_DAYS
 from data.historical_universe import get_historical_universe
 from data.market_data import LocalParquetProvider, load_market_data
 from data.ticker_history import (
@@ -25,6 +26,7 @@ from data.ticker_history import (
     get_provider_symbol,
     lifecycle_status_for_period,
 )
+from strategies.registry import get_strategy
 
 
 def price_frames(tickers, date="2025-01-06", price=100.0):
@@ -359,6 +361,7 @@ class BenchmarkIsolationTests(unittest.TestCase):
                     pd.Timestamp("2025-01-06"),
                     pd.Timestamp("2025-01-10"),
                     "SPY",
+                    get_strategy("Baseline").required_history_days,
                 )
         self.assertEqual(loader.call_count, 1)
 
@@ -463,6 +466,106 @@ class BenchmarkIsolationTests(unittest.TestCase):
                 RuntimeError, "benchmark coverage is incomplete.*day gap"
             ):
                 run_backtest("2025-01-01", "2025-02-28")
+
+
+class StrategyHistoryTests(unittest.TestCase):
+    @staticmethod
+    def _load_report():
+        return {
+            "Status": "USING CACHE",
+            "Downloaded Tickers": [],
+            "Cache Directory": "test-cache",
+            "Data Source Failures": [],
+            "Unavailable Valid Constituents": [],
+            "Secondary Sources Used": [],
+            "Ticker Classifications": {},
+        }
+
+    def test_baseline_warmup_matches_previous_engine_calculation(self):
+        start = pd.Timestamp("2025-01-06")
+        end = pd.Timestamp("2025-01-10")
+        previous_required_days = max(
+            LONG_MOMENTUM_DAYS + 1,
+            MOVING_AVERAGE_DAYS,
+        )
+        expected_warmup = start - pd.Timedelta(days=previous_required_days * 3)
+        warmup_starts = []
+
+        def fake_load(tickers, start_date, end_date, **kwargs):
+            if not tickers:
+                return {}, self._load_report()
+            warmup_starts.append(pd.Timestamp(start_date))
+            frame = cache_frame(start_date, end_date - pd.Timedelta(days=1))
+            return {tickers[0]: frame}, self._load_report()
+
+        with patch(
+            "backtesting.engine.load_market_data", side_effect=fake_load
+        ), patch("backtesting.engine.get_backtest_tickers", return_value=["SPY"]):
+            download_backtest_data(
+                start,
+                end,
+                "SPY",
+                get_strategy("Baseline").required_history_days,
+            )
+
+        self.assertEqual(warmup_starts[0], expected_warmup)
+
+    def test_longer_strategy_requests_substantially_more_warmup_history(self):
+        start = pd.Timestamp("2025-01-06")
+        end = pd.Timestamp("2025-01-10")
+        baseline_days = get_strategy("Baseline").required_history_days
+        long_strategy_days = 120
+        warmup_starts = []
+
+        def fake_load(tickers, start_date, end_date, **kwargs):
+            if not tickers:
+                return {}, self._load_report()
+            warmup_starts.append(pd.Timestamp(start_date))
+            frame = cache_frame(start_date, end_date - pd.Timedelta(days=1))
+            return {tickers[0]: frame}, self._load_report()
+
+        with patch(
+            "backtesting.engine.load_market_data", side_effect=fake_load
+        ), patch("backtesting.engine.get_backtest_tickers", return_value=["SPY"]):
+            download_backtest_data(start, end, "SPY", long_strategy_days)
+            download_backtest_data(start, end, "SPY", baseline_days)
+
+        long_warmup = start - pd.Timedelta(days=long_strategy_days * 3)
+        baseline_warmup = start - pd.Timedelta(days=baseline_days * 3)
+        self.assertEqual(warmup_starts[0], long_warmup)
+        self.assertEqual(warmup_starts[1], baseline_warmup)
+        self.assertLess(long_warmup, baseline_warmup)
+        self.assertGreater(
+            (baseline_warmup - long_warmup).days,
+            (long_strategy_days - baseline_days) * 2,
+        )
+
+    def test_run_backtest_passes_strategy_history_requirement_to_data_loader(self):
+        start = pd.Timestamp("2025-01-06")
+        end = pd.Timestamp("2025-01-10")
+        captured = {}
+
+        def capture_download(
+            start_date,
+            end_date,
+            benchmark,
+            required_history_days,
+            status_callback=None,
+        ):
+            captured["required_history_days"] = required_history_days
+            spy = cache_frame("2025-01-06", "2025-01-10")
+            return {"SPY": spy}, StrategyHistoryTests._load_report()
+
+        with patch(
+            "backtesting.engine.download_backtest_data",
+            side_effect=capture_download,
+        ), patch("backtesting.engine.rank_buy_candidates", return_value=[]):
+            run_backtest(start, end, strategy_name="Baseline")
+
+        self.assertEqual(
+            captured["required_history_days"],
+            get_strategy("Baseline").required_history_days,
+        )
 
 
 class PortfolioRuleTests(unittest.TestCase):

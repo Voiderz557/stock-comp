@@ -6,12 +6,20 @@ import zipfile
 import pandas as pd
 
 from backtesting.export import build_complete_backtest_package
+from config import LONG_MOMENTUM_DAYS, MOVING_AVERAGE_DAYS
+from strategies.baseline import REQUIRED_HISTORY_DAYS
 from strategies.registry import available_strategy_names, get_strategy
 
 
 class BaselineRegressionTests(unittest.TestCase):
     def test_registry_contains_only_real_baseline_strategy(self):
         self.assertEqual(available_strategy_names(), ["Baseline"])
+
+    def test_baseline_required_history_days_is_correct(self):
+        expected = max(LONG_MOMENTUM_DAYS + 1, MOVING_AVERAGE_DAYS)
+        self.assertEqual(REQUIRED_HISTORY_DAYS, expected)
+        self.assertEqual(get_strategy("Baseline").required_history_days, expected)
+        self.assertEqual(get_strategy("Baseline").required_history_days, 21)
 
     def test_baseline_matches_pre_refactor_fixture(self):
         closes = [100 + index * 0.5 for index in range(30)]
