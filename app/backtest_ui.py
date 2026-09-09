@@ -19,6 +19,8 @@ from config import (
 )
 from data.historical_universe import SNAPSHOT_DATES
 from data.market_data import clear_market_data_cache
+from market.regime import load_current_market_regime
+from market.strategy_selector import describe_availability, recommend_strategy
 from strategies.registry import available_strategy_names, get_strategy
 
 
@@ -28,6 +30,70 @@ st.write(
     "Test one algorithm or compare algorithms across the exact same random "
     "market periods."
 )
+
+with st.expander("Market Regime (informational only)", expanded=True):
+    st.caption(
+        "Rule-based read on current SPY/QQQ conditions. This is informational "
+        "only - it does not place trades or filter backtests."
+    )
+    if st.button("Detect current market regime"):
+        try:
+            regime_result, _cache_info = load_current_market_regime()
+            recommendation = recommend_strategy(regime_result)
+
+            regime_col, confidence_col = st.columns(2)
+            regime_col.metric("Current Market Regime", regime_result.regime)
+            confidence_col.metric("Confidence", f"{regime_result.confidence:.0%}")
+
+            st.write(f"**Reason:** {regime_result.reason}")
+
+            preferred = describe_availability(recommendation.preferred_strategies)
+            avoid = describe_availability(recommendation.strategies_to_avoid)
+
+            def _format_availability(pairs):
+                if not pairs:
+                    return "None"
+                return ", ".join(
+                    name if is_available else f"{name} (not yet implemented)"
+                    for name, is_available in pairs
+                )
+
+            st.write(f"**Preferred Strategies:** {_format_availability(preferred)}")
+            st.write(f"**Strategies to Avoid:** {_format_availability(avoid)}")
+            if recommendation.notes:
+                for note in recommendation.notes:
+                    st.info(note)
+
+            with st.expander("Supporting metrics", expanded=False):
+                features = regime_result.features
+                metrics_table = pd.DataFrame(
+                    [
+                        {"Metric": "SPY Price", "Value": f"${features.spy_price:,.2f}"},
+                        {"Metric": "SPY MA50", "Value": f"${features.spy_ma50:,.2f}"},
+                        {"Metric": "SPY MA200", "Value": f"${features.spy_ma200:,.2f}"},
+                        {"Metric": "SPY Momentum 20D", "Value": f"{features.spy_momentum_20d:+.2%}"},
+                        {"Metric": "SPY Momentum 60D", "Value": f"{features.spy_momentum_60d:+.2%}"},
+                        {"Metric": "QQQ Price", "Value": f"${features.qqq_price:,.2f}"},
+                        {"Metric": "QQQ MA50", "Value": f"${features.qqq_ma50:,.2f}"},
+                        {"Metric": "QQQ MA200", "Value": f"${features.qqq_ma200:,.2f}"},
+                        {"Metric": "QQQ Momentum 20D", "Value": f"{features.qqq_momentum_20d:+.2%}"},
+                        {"Metric": "QQQ Momentum 60D", "Value": f"{features.qqq_momentum_60d:+.2%}"},
+                        {"Metric": "20D Market Volatility", "Value": f"{features.market_volatility_20d:.2%}"},
+                    ]
+                )
+                st.dataframe(metrics_table, width="stretch", hide_index=True)
+                st.dataframe(
+                    pd.DataFrame(
+                        {
+                            "Check": list(regime_result.supporting_metrics.keys()),
+                            "Result": list(regime_result.supporting_metrics.values()),
+                        }
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+        except Exception as error:
+            st.error(f"Could not detect the current market regime: {error}")
 
 strategy_names = available_strategy_names()
 mode = st.radio(
