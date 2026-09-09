@@ -83,7 +83,7 @@ with st.form("backtest_settings"):
     with primary_4:
         number_of_tests = st.selectbox(
             "Number of Random Tests",
-            options=[1, 2, 5, 10, 20],
+            options=[1, 2, 5, 10, 20, 25, 50, 100],
             index=2,
             help="More tests sample more periods but take longer to run.",
         )
@@ -319,19 +319,58 @@ if results:
 
     st.subheader("Algorithm Comparison")
     comparison = build_comparison_summary(results)
+    competition_return_column = "Return >= 20%"
+    comparison_format = {
+        "Average Return": "{:+.2%}",
+        "Median Return": "{:+.2%}",
+        "Average Benchmark Return": "{:+.2%}",
+        "Average Excess Return": "{:+.2%}",
+        "Median Excess Return": "{:+.2%}",
+        "Win Rate vs Benchmark": "{:.0%}",
+        "Beat Benchmark %": "{:.0%}",
+        "Positive Return %": "{:.0%}",
+        "Best Return": "{:+.2%}",
+        "Worst Return": "{:+.2%}",
+        "Average Number of Trades": "{:.1f}",
+        "Return >= 10%": "{:.0%}",
+        "Return >= 15%": "{:.0%}",
+        "Return >= 20%": "{:.0%}",
+        "Return >= 25%": "{:.0%}",
+        "Return >= 30%": "{:.0%}",
+    }
+
+    def highlight_competition_threshold(series):
+        if series.name != competition_return_column:
+            return [""] * len(series)
+        return [
+            "background-color: #134e4a; color: #ecfdf5; font-weight: 700"
+        ] * len(series)
+
+    styled_comparison = (
+        comparison.style.format(comparison_format)
+        .apply(highlight_competition_threshold)
+        .set_properties(
+            subset=[competition_return_column],
+            **{"border": "2px solid #2dd4bf"},
+        )
+    )
+    st.caption(
+        "Return ≥ 20% is highlighted: share of completed tests with Total Return "
+        "at least 20%. Failed tests are excluded from every percentage."
+    )
     st.dataframe(
-        comparison.style.format(
-            {
-                "Average Return": "{:+.2%}",
-                "Median Return": "{:+.2%}",
-                "Average Benchmark Return": "{:+.2%}",
-                "Average Excess Return": "{:+.2%}",
-                "Win Rate vs Benchmark": "{:.0%}",
-                "Average Number of Trades": "{:.1f}",
-            }
-        ),
+        styled_comparison,
         width="stretch",
         hide_index=True,
+        column_config={
+            competition_return_column: st.column_config.Column(
+                "★ Return ≥ 20%",
+                help=(
+                    "Share of successfully completed tests with Total Return "
+                    ">= 20%. Exact 20% counts. Failed tests are excluded."
+                ),
+            ),
+        },
     )
 
     st.subheader("Completed Tests")

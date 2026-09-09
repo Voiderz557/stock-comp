@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 .env
 data_cache/
+paper_trading_data/
 .pytest_cache/

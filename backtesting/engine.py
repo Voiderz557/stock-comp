@@ -19,7 +19,7 @@ from data.historical_universe import (
     get_membership_ranges,
 )
 from data.market_data import load_market_data
-from strategies.registry import get_strategy
+from strategies.registry import get_strategy, invoke_analyze
 
 
 def benchmark_coverage_error(
@@ -237,6 +237,7 @@ def rank_buy_candidates(
     universe=None,
     min_stock_price=MIN_STOCK_PRICE,
     strategy=None,
+    benchmark_data=None,
 ):
     """Rank BUY stocks using information known before the trading day."""
     candidates = []
@@ -245,6 +246,19 @@ def rank_buy_candidates(
         universe = get_historical_universe(rebalance_date).tickers
     if strategy is None:
         strategy = get_strategy(DEFAULT_STRATEGY_NAME)
+
+    preferred_benchmark = getattr(strategy, "benchmark_ticker", None)
+    relative_benchmark = None
+    if preferred_benchmark:
+        relative_benchmark = get_ticker_data(downloaded_data, preferred_benchmark)
+    if relative_benchmark is None:
+        relative_benchmark = benchmark_data
+
+    historical_benchmark = None
+    if relative_benchmark is not None and not relative_benchmark.empty:
+        historical_benchmark = relative_benchmark.loc[
+            relative_benchmark.index < rebalance_date
+        ].copy()
 
     for ticker in universe:
         ticker_data = get_ticker_data(downloaded_data, ticker)
@@ -259,12 +273,18 @@ def rank_buy_candidates(
         # LOOK-AHEAD PROTECTION:
         # The signal receives only rows strictly before the rebalance date.
         # Today's Open is used for trading, but today's Close is never passed
-        # to the strategy before that trade occurs.
+        # to the strategy before that trade occurs. The same cut is applied
+        # to any relative-strength benchmark series.
         historical_data = ticker_data.loc[
             ticker_data.index < rebalance_date
         ].copy()
 
-        result = strategy.analyze(ticker, historical_data)
+        result = invoke_analyze(
+            strategy.analyze,
+            ticker,
+            historical_data,
+            benchmark_data=historical_benchmark,
+        )
 
         if result is not None and result["Signal"] == "BUY":
             candidates.append(result)
@@ -441,6 +461,40 @@ def run_backtest(
         strategy.required_history_days,
         status_callback=status_callback,
     )
+    relative_strength_ticker = strategy.benchmark_ticker
+    if (
+        relative_strength_ticker
+        and get_ticker_data(downloaded_data, relative_strength_ticker) is None
+    ):
+        warmup_start = start_date - pd.Timedelta(
+            days=strategy.required_history_days * 3
+        )
+        extra_data, extra_report = load_market_data(
+            [relative_strength_ticker],
+            warmup_start,
+            end_date,
+            status_callback=status_callback,
+        )
+        downloaded_data = {**downloaded_data, **extra_data}
+        cache_report = {
+            **cache_report,
+            "Status": (
+                "DOWNLOADING"
+                if "DOWNLOADING"
+                in {cache_report.get("Status"), extra_report.get("Status")}
+                else cache_report.get("Status")
+            ),
+            "Downloaded Tickers": cache_report.get("Downloaded Tickers", [])
+            + extra_report.get("Downloaded Tickers", []),
+            "Data Source Failures": cache_report.get("Data Source Failures", [])
+            + extra_report.get("Data Source Failures", []),
+            "Secondary Sources Used": cache_report.get("Secondary Sources Used", [])
+            + extra_report.get("Secondary Sources Used", []),
+            "Ticker Classifications": {
+                **cache_report.get("Ticker Classifications", {}),
+                **extra_report.get("Ticker Classifications", {}),
+            },
+        }
     benchmark_data = get_ticker_data(downloaded_data, benchmark)
 
     if benchmark_data is None:
@@ -496,12 +550,20 @@ def run_backtest(
 
         if week != previous_week:
             universe_snapshot = get_historical_universe(date)
+            relative_benchmark = None
+            if strategy.benchmark_ticker:
+                relative_benchmark = get_ticker_data(
+                    downloaded_data, strategy.benchmark_ticker
+                )
+            if relative_benchmark is None:
+                relative_benchmark = benchmark_data
             selected_stocks = rank_buy_candidates(
                 downloaded_data,
                 date,
                 universe=universe_snapshot.tickers,
                 min_stock_price=min_stock_price,
                 strategy=strategy,
+                benchmark_data=relative_benchmark,
             )
             cash = rebalance_portfolio(
                 downloaded_data,

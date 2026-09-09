@@ -33,3 +33,23 @@ MANUAL_HISTORICAL_DATA_DIR = "historical_data"
 CACHE_COVERAGE_TOLERANCE_DAYS = 7
 YFINANCE_REQUEST_TIMEOUT_SECONDS = 8
 YFINANCE_HARD_TIMEOUT_SECONDS = 12
+
+# ---------------------------------------------------------------------------
+# PAPER-TRADING / COMPETITION DASHBOARD - short-selling placeholders.
+#
+# These are NOT confirmed competition rules. They exist only so the paper
+# recommendation dashboard (app/competition_dashboard.py) can experiment
+# with short exposure limits before official short-selling rules are known.
+# Update these once the real competition rules are confirmed.
+#
+# NOTE: LONG and SHORT share ONE combined gross-exposure limit equal to
+# starting capital (see paper_trading/storage.py::get_remaining_capacity and
+# app/competition_recommender.py::build_paper_portfolio) - there is
+# deliberately NO separate "total short exposure" wallet/constant here.
+# ---------------------------------------------------------------------------
+ALLOW_SHORTS_DEFAULT = True
+MAX_SHORT_POSITION_VALUE = 20_000  # PLACEHOLDER: per-stock short exposure cap
+
+# Persistent paper-portfolio storage (survives closing/reopening the app).
+PAPER_PORTFOLIO_DB_PATH = "paper_trading_data/paper_portfolio.sqlite3"
+PAPER_PORTFOLIO_STARTING_CASH = BACKTEST_STARTING_CASH

@@ -9,6 +9,41 @@ from datetime import date, datetime
 import pandas as pd
 
 
+# Competition-oriented return thresholds. Each becomes a column
+# "Return >= X%" equal to the share of completed tests at or above X.
+RETURN_THRESHOLD_LEVELS = (0.10, 0.15, 0.20, 0.25, 0.30)
+COMPETITION_RETURN_COLUMN = "Return >= 20%"
+
+
+def return_threshold_column(threshold):
+    """Readable column name for one return-threshold hit rate."""
+    return f"Return >= {threshold:.0%}"
+
+
+def _is_completed_result(result):
+    """True when a backtest finished with usable strategy and benchmark returns.
+
+    Failed tests (an Error field, or missing/NaN returns) are excluded from
+    every comparison-summary denominator.
+    """
+    if result.get("Error"):
+        return False
+    total_return = result.get("Total Return")
+    benchmark_return = result.get("Benchmark Return")
+    if total_return is None or benchmark_return is None:
+        return False
+    if pd.isna(total_return) or pd.isna(benchmark_return):
+        return False
+    return True
+
+
+def _threshold_hit_rate(returns, threshold):
+    """P(return >= threshold) over the completed tests in `returns`."""
+    if len(returns) == 0:
+        return float("nan")
+    return float((returns >= threshold).mean())
+
+
 def build_test_summary(results):
     rows = []
     for result in results:
@@ -36,17 +71,27 @@ def build_test_summary(results):
 
 
 def build_comparison_summary(results):
-    tests = build_test_summary(results)
+    completed = [result for result in results if _is_completed_result(result)]
+    tests = build_test_summary(completed)
+    threshold_columns = [
+        return_threshold_column(threshold) for threshold in RETURN_THRESHOLD_LEVELS
+    ]
     columns = [
         "Algorithm",
         "Average Return",
         "Median Return",
         "Average Benchmark Return",
         "Average Excess Return",
+        "Median Excess Return",
         "Win Rate vs Benchmark",
+        "Beat Benchmark %",
+        "Positive Return %",
         "Best Test",
         "Worst Test",
+        "Best Return",
+        "Worst Return",
         "Average Number of Trades",
+        *threshold_columns,
     ]
     if tests.empty:
         return pd.DataFrame(columns=columns)
@@ -55,19 +100,28 @@ def build_comparison_summary(results):
     for algorithm, group in tests.groupby("Algorithm", sort=False):
         best = group.loc[group["Strategy Return"].idxmax()]
         worst = group.loc[group["Strategy Return"].idxmin()]
-        rows.append(
-            {
-                "Algorithm": algorithm,
-                "Average Return": group["Strategy Return"].mean(),
-                "Median Return": group["Strategy Return"].median(),
-                "Average Benchmark Return": group["Benchmark Return"].mean(),
-                "Average Excess Return": group["Excess Return"].mean(),
-                "Win Rate vs Benchmark": (group["Excess Return"] > 0).mean(),
-                "Best Test": f"Test {int(best['Test'])}: {best['Strategy Return']:+.2%}",
-                "Worst Test": f"Test {int(worst['Test'])}: {worst['Strategy Return']:+.2%}",
-                "Average Number of Trades": group["Number of Trades"].mean(),
-            }
-        )
+        beat_benchmark = float((group["Excess Return"] > 0).mean())
+        row = {
+            "Algorithm": algorithm,
+            "Average Return": group["Strategy Return"].mean(),
+            "Median Return": group["Strategy Return"].median(),
+            "Average Benchmark Return": group["Benchmark Return"].mean(),
+            "Average Excess Return": group["Excess Return"].mean(),
+            "Median Excess Return": group["Excess Return"].median(),
+            "Win Rate vs Benchmark": beat_benchmark,
+            "Beat Benchmark %": beat_benchmark,
+            "Positive Return %": float((group["Strategy Return"] > 0).mean()),
+            "Best Test": f"Test {int(best['Test'])}: {best['Strategy Return']:+.2%}",
+            "Worst Test": f"Test {int(worst['Test'])}: {worst['Strategy Return']:+.2%}",
+            "Best Return": float(best["Strategy Return"]),
+            "Worst Return": float(worst["Strategy Return"]),
+            "Average Number of Trades": group["Number of Trades"].mean(),
+        }
+        for threshold in RETURN_THRESHOLD_LEVELS:
+            row[return_threshold_column(threshold)] = _threshold_hit_rate(
+                group["Strategy Return"], threshold
+            )
+        rows.append(row)
     return pd.DataFrame(rows, columns=columns)
 
 
