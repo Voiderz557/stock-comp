@@ -520,7 +520,8 @@ class StrategyHistoryTests(unittest.TestCase):
         def fake_load(tickers, start_date, end_date, **kwargs):
             if not tickers:
                 return {}, self._load_report()
-            warmup_starts.append(pd.Timestamp(start_date))
+            if list(tickers) == ["SPY"]:
+                warmup_starts.append(pd.Timestamp(start_date))
             frame = cache_frame(start_date, end_date - pd.Timedelta(days=1))
             return {tickers[0]: frame}, self._load_report()
 

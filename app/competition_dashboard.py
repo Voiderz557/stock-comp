@@ -27,7 +27,11 @@ from paper_trading.portfolio import (
     scan_for_candidates,
     summarize_portfolio,
 )
-from strategies.registry import available_strategy_names, get_strategy
+from strategies.registry import (
+    available_strategy_names,
+    extra_strategy_benchmark_tickers,
+    get_strategy,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -291,9 +295,10 @@ if st.button("Scan configured universe"):
     today = pd.Timestamp.today().normalize()
     start_date = today - pd.Timedelta(days=calendar_days)
 
-    with st.spinner(f"Loading price history for {len(STOCK_UNIVERSE)} tickers..."):
+    scan_tickers = list(dict.fromkeys(list(STOCK_UNIVERSE) + extra_strategy_benchmark_tickers()))
+    with st.spinner(f"Loading price history for {len(scan_tickers)} tickers..."):
         try:
-            price_data, cache_info = load_market_data(list(STOCK_UNIVERSE), start_date, today)
+            price_data, cache_info = load_market_data(scan_tickers, start_date, today)
         except Exception as error:
             price_data, cache_info = {}, {}
             st.error(f"Could not load market data for the scan: {error}")

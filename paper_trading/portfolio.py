@@ -6,6 +6,8 @@ plain data out. This keeps it fully unit-testable without a database,
 network access, or Streamlit.
 """
 
+from strategies.registry import invoke_analyze
+
 
 def latest_close_prices(price_data_by_ticker):
     """Extract the most recent available Close price for each ticker.
@@ -118,7 +120,14 @@ def scan_for_candidates(universe, strategy_names, price_data_by_ticker, get_stra
             if data is None or data.empty:
                 continue
             try:
-                result = definition.analyze(ticker, data)
+                preferred = getattr(definition, "benchmark_ticker", None)
+                relative_benchmark = (price_data_by_ticker or {}).get(preferred) if preferred else None
+                result = invoke_analyze(
+                    definition.analyze,
+                    ticker,
+                    data,
+                    benchmark_data=relative_benchmark,
+                )
             except Exception:
                 continue
             if not result or result.get("Signal") != "BUY":

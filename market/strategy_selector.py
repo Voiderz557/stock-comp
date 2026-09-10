@@ -55,24 +55,28 @@ _STRATEGY_MAP = {
     ),
     WEAK_UPTREND: StrategyRecommendation(
         regime=WEAK_UPTREND,
-        preferred_strategies=("Momentum V2", "Relative Strength Momentum V1"),
+        preferred_strategies=(
+            "Momentum V2",
+            "Relative Strength Momentum V1",
+            "Mean Reversion V1",
+        ),
         strategies_to_avoid=(),
         reason=(
             "Market is generally above long-term trend but momentum is mixed or "
-            "weaker, favoring steadier momentum strategies over aggressive ones."
+            "weaker, favoring steadier momentum strategies over aggressive ones. "
+            "Mean Reversion V1 is listed as a secondary option since weak-trend "
+            "conditions can still produce tradeable pullbacks."
         ),
     ),
     SIDEWAYS: StrategyRecommendation(
         regime=SIDEWAYS,
-        preferred_strategies=("Baseline",),
+        preferred_strategies=("Mean Reversion V1", "Baseline"),
         strategies_to_avoid=(),
         reason=(
             "Market lacks clear direction and momentum is low in absolute terms; "
-            "Baseline is used as a conservative placeholder for this regime."
-        ),
-        notes=(
-            "A dedicated Mean Reversion strategy is not yet implemented and is "
-            "recommended future work for SIDEWAYS markets.",
+            "Mean Reversion V1 is purpose-built for pullbacks in exactly this "
+            "kind of range-bound market and is preferred, with Baseline kept as "
+            "a conservative secondary option."
         ),
     ),
     DOWNTREND: StrategyRecommendation(
@@ -84,11 +88,14 @@ _STRATEGY_MAP = {
             "Relative Strength Momentum V1",
             "Momentum V2",
             "Baseline",
+            "Mean Reversion V1",
         ),
         reason=(
             "Broad market trend is bearish. No existing strategy is designed to "
             "perform well in a downtrend, so cash / WATCH is preferred over "
-            "forcing a long trade."
+            "forcing a long trade. Mean Reversion V1 is also avoided here: a "
+            "'pullback' in a confirmed downtrend is much more likely to be a "
+            "continuation than a genuine reversion."
         ),
         notes=(
             "No bearish/short strategy exists yet; a future dedicated bearish "

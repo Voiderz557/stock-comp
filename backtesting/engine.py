@@ -19,7 +19,7 @@ from data.historical_universe import (
     get_membership_ranges,
 )
 from data.market_data import load_market_data
-from strategies.registry import get_strategy
+from strategies.registry import extra_strategy_benchmark_tickers, get_strategy, invoke_analyze
 
 
 def benchmark_coverage_error(
@@ -88,7 +88,13 @@ def download_backtest_data(
     required_history_days,
     status_callback=None,
 ):
-    """Download the universe, benchmark, and indicator warm-up history."""
+    """Download the universe, benchmark, and indicator warm-up history.
+
+    ``start_date`` / ``end_date`` are EVALUATION dates used for Nasdaq-100
+    membership (`get_backtest_tickers` / `get_membership_ranges`). Price
+    warmup (`warmup_start`) may precede the first supported membership
+    date; membership lookups never use `warmup_start`.
+    """
     warmup_start = start_date - pd.Timedelta(days=required_history_days * 3)
 
     constituent_tickers = [
@@ -96,6 +102,9 @@ def download_backtest_data(
         for ticker in get_backtest_tickers(start_date, end_date)
         if ticker != benchmark
     ]
+    for extra_ticker in extra_strategy_benchmark_tickers():
+        if extra_ticker != benchmark and extra_ticker not in constituent_tickers:
+            constituent_tickers.append(extra_ticker)
     try:
         benchmark_data, benchmark_report = load_market_data(
             [benchmark],
@@ -237,6 +246,7 @@ def rank_buy_candidates(
     universe=None,
     min_stock_price=MIN_STOCK_PRICE,
     strategy=None,
+    benchmark_data=None,
 ):
     """Rank BUY stocks using information known before the trading day."""
     candidates = []
@@ -245,6 +255,18 @@ def rank_buy_candidates(
         universe = get_historical_universe(rebalance_date).tickers
     if strategy is None:
         strategy = get_strategy(DEFAULT_STRATEGY_NAME)
+
+    preferred_benchmark = getattr(strategy, "benchmark_ticker", None)
+    relative_benchmark = (
+        get_ticker_data(downloaded_data, preferred_benchmark) if preferred_benchmark else None
+    )
+    if relative_benchmark is None:
+        relative_benchmark = benchmark_data
+    historical_benchmark = None
+    if relative_benchmark is not None and not relative_benchmark.empty:
+        historical_benchmark = relative_benchmark.loc[
+            relative_benchmark.index < rebalance_date
+        ].copy()
 
     for ticker in universe:
         ticker_data = get_ticker_data(downloaded_data, ticker)
@@ -264,7 +286,12 @@ def rank_buy_candidates(
             ticker_data.index < rebalance_date
         ].copy()
 
-        result = strategy.analyze(ticker, historical_data)
+        result = invoke_analyze(
+            strategy.analyze,
+            ticker,
+            historical_data,
+            benchmark_data=historical_benchmark,
+        )
 
         if result is not None and result["Signal"] == "BUY":
             candidates.append(result)
@@ -502,6 +529,7 @@ def run_backtest(
                 universe=universe_snapshot.tickers,
                 min_stock_price=min_stock_price,
                 strategy=strategy,
+                benchmark_data=benchmark_data,
             )
             cash = rebalance_portfolio(
                 downloaded_data,
