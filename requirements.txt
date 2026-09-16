@@ -4,4 +4,3 @@ streamlit
 pyarrow
 matplotlib
 scikit-learn
-scikit-learn

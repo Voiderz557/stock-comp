@@ -90,6 +90,39 @@ total_return = (
 )
 metric_columns[4].metric("Total Return", f"{total_return:+.2%}")
 
+capacity_columns = st.columns(4)
+capacity_columns[0].metric(
+    "Starting Capital",
+    f"${starting_capital:,.2f}" if summary["Starting Capital"] is not None else "n/a",
+)
+if summary["Capacity Available"]:
+    capacity_columns[1].metric(
+        "Current Long Exposure", f"${summary['Current Long Exposure']:,.2f}"
+    )
+    capacity_columns[2].metric(
+        "Gross Exposure",
+        f"${summary['Gross Exposure']:,.2f}",
+        help="Current long market value + abs(current short market value). "
+        "LONG and SHORT share this one ceiling.",
+    )
+    capacity_columns[3].metric(
+        "Remaining Capacity",
+        f"${summary['Remaining Capacity']:,.2f}",
+        help="max(0, starting capital - gross exposure). New opens must fit "
+        "both this and available cash.",
+    )
+    st.caption(
+        f"Current short exposure ${summary['Current Short Exposure']:,.2f}. "
+        "Market moves that push gross exposure above starting capital block "
+        "new opens but never force a close."
+    )
+else:
+    capacity_columns[1].metric("Current Long Exposure", "n/a")
+    capacity_columns[2].metric("Gross Exposure", "n/a")
+    capacity_columns[3].metric("Remaining Capacity", "n/a")
+    if summary["Capacity Error"]:
+        st.warning(summary["Capacity Error"])
+
 st.subheader("Open Positions")
 if not summary["Open Positions"]:
     st.info("No open paper positions.")
@@ -117,6 +150,7 @@ else:
         "Quantity",
         "Allocated Capital",
         "Market Value",
+        "Current Exposure",
         "Unrealized P&L",
         "Unrealized P&L %",
         "Entry Time",
@@ -132,6 +166,7 @@ else:
                 "Quantity": "{:,.4f}",
                 "Allocated Capital": "${:,.2f}",
                 "Market Value": "${:,.2f}",
+                "Current Exposure": "${:,.2f}",
                 "Unrealized P&L": "${:+,.2f}",
                 "Unrealized P&L %": "{:+.2%}",
             }
@@ -370,6 +405,7 @@ else:
                         strategy=strategy_name,
                         reason=chosen_result.get("Reason", ""),
                         direction="LONG",
+                        current_prices=current_prices,
                     )
                     st.success(
                         f"Opened paper position #{position_id}: {chosen_ticker} LONG at "

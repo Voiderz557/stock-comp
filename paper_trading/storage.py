@@ -10,20 +10,29 @@ things in a local SQLite database:
     closed_trades   - one row per simulated position that has been closed,
                        kept as permanent history.
 
-All money math (unrealized P&L, portfolio value, etc.) lives in
-`paper_trading.portfolio`, which is pure and does not touch the database.
-This module is intentionally "dumb": it reads and writes rows and enforces
-just enough validation to keep the paper ledger internally consistent
-(e.g. you cannot allocate more paper cash than you have).
+P&L and mark-to-market exposure math live in `paper_trading.portfolio`.
+This module reads and writes rows, then enforces two independent limits on
+every new open:
+
+    1. available cash (LONG and SHORT both debit `allocated_capital`)
+    2. remaining shared capacity
+       (starting_capital - current long market value
+        - abs(current short market value), floored at 0)
 """
 
+import math
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+from paper_trading.portfolio import compute_exposure_summary, position_notional_exposure
 
 
 DEFAULT_DB_PATH = "paper_trading_data/paper_portfolio.sqlite3"
 STARTING_CAPITAL = 100_000.0
+_CONNECT_TIMEOUT_SECONDS = 30.0
+_ALLOCATION_MATCH_TOLERANCE = 1e-6
 
 _ACCOUNT_STATE_COLUMNS = ("cash", "realized_pnl", "updated_at", "starting_capital")
 _OPEN_POSITION_COLUMNS = (
@@ -71,16 +80,60 @@ def _resolve_db_path(db_path=None):
 def _connect(db_path=None):
     resolved = _resolve_db_path(db_path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(resolved)
+    connection = sqlite3.connect(resolved, timeout=_CONNECT_TIMEOUT_SECONDS)
     connection.row_factory = sqlite3.Row
     return connection
+
+
+@contextmanager
+def _immediate_transaction(db_path=None):
+    """One SQLite connection with BEGIN IMMEDIATE so concurrent opens serialize.
+
+    Account read, exposure check, position write, and cash update all happen
+    on this connection before COMMIT.
+    """
+    connection = _connect(db_path)
+    connection.isolation_level = None
+    started = False
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        started = True
+        yield connection
+        connection.execute("COMMIT")
+    except Exception:
+        if started:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
+
+
+def _require_finite_positive(name, value):
+    if value is None:
+        raise ValueError(f"{name} must be a finite positive number.")
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a finite positive number.") from error
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite positive number.")
+    return value
+
+
+def _table_columns(connection, table_name):
+    return {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
 
 
 def initialize_storage(db_path=None, starting_capital=STARTING_CAPITAL):
     """Create the schema if needed and seed the account with starting cash.
 
     Safe to call every time the dashboard loads: it is a no-op once the
-    database already has a seeded `account_state` row.
+    database already has a seeded `account_state` row. Existing
+    `starting_capital` is never overwritten, and a missing value is never
+    inferred from current cash.
     """
     connection = _connect(db_path)
     try:
@@ -95,6 +148,11 @@ def initialize_storage(db_path=None, starting_capital=STARTING_CAPITAL):
             )
             """
         )
+        account_columns = _table_columns(connection, "account_state")
+        if "starting_capital" not in account_columns:
+            connection.execute(
+                "ALTER TABLE account_state ADD COLUMN starting_capital REAL"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS open_positions (
@@ -196,6 +254,13 @@ def get_closed_trades(db_path=None):
     return [dict(row) for row in rows]
 
 
+def _load_open_positions(connection):
+    rows = connection.execute(
+        "SELECT * FROM open_positions ORDER BY entry_timestamp ASC, id ASC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def open_position(
     ticker,
     entry_price,
@@ -205,42 +270,58 @@ def open_position(
     reason="",
     direction="LONG",
     entry_timestamp=None,
+    current_prices=None,
     db_path=None,
 ):
-    """Open a simulated position and debit the paper cash balance.
+    """Open a simulated position, debiting cash and consuming shared capacity.
 
-    Provide either `quantity` or `allocated_capital` (not necessarily
-    both) - the other is derived from `entry_price`. Raises `ValueError` if
-    the requested allocation exceeds available paper cash.
+    Provide either `quantity` or `allocated_capital` (or both, if they agree
+    with `entry_price`). Both LONG and SHORT debit `allocated_capital` from
+    cash. A new open is also rejected unless it fits in remaining shared
+    capacity, marked to market from `current_prices` (no entry-price fallback).
     """
     if direction not in ("LONG", "SHORT"):
         raise ValueError("direction must be 'LONG' or 'SHORT'.")
-    if entry_price is None or entry_price <= 0:
-        raise ValueError("entry_price must be a positive number.")
+    if not ticker:
+        raise ValueError("ticker is required.")
+    entry_price = _require_finite_positive("entry_price", entry_price)
     if quantity is None and allocated_capital is None:
         raise ValueError("Provide either quantity or allocated_capital.")
 
-    entry_price = float(entry_price)
-    if quantity is None:
-        allocated_capital = float(allocated_capital)
-        quantity = allocated_capital / entry_price
-    elif allocated_capital is None:
-        quantity = float(quantity)
+    parsed_quantity = None if quantity is None else _require_finite_positive("quantity", quantity)
+    parsed_allocation = (
+        None
+        if allocated_capital is None
+        else _require_finite_positive("allocated_capital", allocated_capital)
+    )
+
+    if parsed_quantity is None:
+        quantity = parsed_allocation / entry_price
+        allocated_capital = parsed_allocation
+    elif parsed_allocation is None:
+        quantity = parsed_quantity
         allocated_capital = quantity * entry_price
     else:
-        quantity = float(quantity)
-        allocated_capital = float(allocated_capital)
+        implied_allocation = parsed_quantity * entry_price
+        tolerance = _ALLOCATION_MATCH_TOLERANCE * max(
+            1.0, abs(implied_allocation), abs(parsed_allocation)
+        )
+        if abs(implied_allocation - parsed_allocation) > tolerance:
+            raise ValueError(
+                "quantity and allocated_capital are inconsistent with entry_price "
+                f"(quantity * entry_price = ${implied_allocation:,.4f}, "
+                f"allocated_capital = ${parsed_allocation:,.4f})."
+            )
+        quantity = parsed_quantity
+        allocated_capital = parsed_allocation
 
-    if quantity <= 0 or allocated_capital <= 0:
-        raise ValueError("quantity and allocated_capital must be positive.")
-
+    new_exposure = position_notional_exposure(quantity, entry_price)
     entry_timestamp = entry_timestamp or _now_iso()
 
-    connection = _connect(db_path)
-    try:
+    with _immediate_transaction(db_path) as connection:
         try:
             account_row = connection.execute(
-                "SELECT cash FROM account_state WHERE id = 1"
+                "SELECT cash, starting_capital FROM account_state WHERE id = 1"
             ).fetchone()
         except sqlite3.OperationalError:
             account_row = None
@@ -249,12 +330,29 @@ def open_position(
                 "Paper trading storage has not been initialized. "
                 "Call initialize_storage() first."
             )
-        cash = account_row["cash"]
+
+        cash = float(account_row["cash"])
         if allocated_capital > cash + 1e-6:
             raise ValueError(
                 f"Insufficient paper cash: requested ${allocated_capital:,.2f} "
                 f"but only ${cash:,.2f} is available."
             )
+
+        open_positions = _load_open_positions(connection)
+        exposure = compute_exposure_summary(
+            open_positions, current_prices, account_row["starting_capital"]
+        )
+        remaining_capacity = exposure["Remaining Capacity"]
+        if new_exposure > remaining_capacity + 1e-6:
+            raise ValueError(
+                f"Allocated exposure (${new_exposure:,.2f}) exceeds remaining "
+                f"shared capacity (${remaining_capacity:,.2f}). Gross exposure "
+                f"(${exposure['Gross Exposure']:,.2f}) plus this position would "
+                f"exceed starting capital (${exposure['Starting Capital']:,.2f}). "
+                "LONG and SHORT share one ceiling; market moves above it block "
+                "new opens but do not force closes."
+            )
+
         cursor = connection.execute(
             "INSERT INTO open_positions "
             "(ticker, direction, entry_price, quantity, allocated_capital, "
@@ -274,24 +372,21 @@ def open_position(
             "UPDATE account_state SET cash = cash - ?, updated_at = ? WHERE id = 1",
             (allocated_capital, _now_iso()),
         )
-        connection.commit()
         return cursor.lastrowid
-    finally:
-        connection.close()
 
 
 def close_position(position_id, exit_price, exit_timestamp=None, db_path=None):
     """Close an open position at `exit_price`, crediting cash and realized P&L.
 
     Returns the realized P&L (positive = paper profit) for this trade.
+    Closing is always allowed even if mark-to-market gross exposure is
+    already above starting capital - this never forces liquidation, it only
+    records an explicit close.
     """
-    if exit_price is None or exit_price <= 0:
-        raise ValueError("exit_price must be a positive number.")
-    exit_price = float(exit_price)
+    exit_price = _require_finite_positive("exit_price", exit_price)
     exit_timestamp = exit_timestamp or _now_iso()
 
-    connection = _connect(db_path)
-    try:
+    with _immediate_transaction(db_path) as connection:
         position = connection.execute(
             "SELECT * FROM open_positions WHERE id = ?", (position_id,)
         ).fetchone()
@@ -331,7 +426,4 @@ def close_position(position_id, exit_price, exit_timestamp=None, db_path=None):
             "WHERE id = 1",
             (proceeds, realized_pnl, _now_iso()),
         )
-        connection.commit()
         return realized_pnl
-    finally:
-        connection.close()
