@@ -35,6 +35,39 @@ def position_notional_exposure(quantity, price):
     return abs(float(quantity) * float(price))
 
 
+def same_ticker_market_value(open_positions, ticker, direction, current_prices):
+    """Mark-to-market notional of existing lots in the same ticker and direction.
+
+    Missing/invalid current prices raise; entry price is never substituted.
+    """
+    if not ticker:
+        return 0.0
+    target = str(ticker).upper()
+    prices = current_prices or {}
+    total = 0.0
+    missing = []
+    for position in open_positions:
+        if str(position.get("ticker", "")).upper() != target:
+            continue
+        if position.get("direction") != direction:
+            continue
+        raw_price = prices.get(position["ticker"])
+        if raw_price is None and position["ticker"] != ticker:
+            raw_price = prices.get(ticker)
+        if not is_valid_market_price(raw_price):
+            missing.append(position["ticker"])
+            continue
+        total += position_notional_exposure(position["quantity"], raw_price)
+    if missing:
+        raise ValueError(
+            f"Cannot enforce the per-stock purchase cap for {ticker} because "
+            "a current market price is missing or invalid for existing lots: "
+            + ", ".join(sorted(set(missing)))
+            + ". Entry price is not used as a stand-in."
+        )
+    return total
+
+
 def compute_exposure_summary(open_positions, current_prices, starting_capital):
     """Mark existing positions to market for the shared capacity ceiling.
 
@@ -109,6 +142,7 @@ def compute_exposure_summary(open_positions, current_prices, starting_capital):
         "Current Long Exposure": long_exposure,
         "Current Short Exposure": short_exposure,
         "Gross Exposure": gross_exposure,
+        "Net Exposure": long_exposure - short_exposure,
         "Remaining Capacity": remaining_capacity,
     }
 
@@ -204,6 +238,7 @@ def summarize_portfolio(account_state, open_positions, current_prices):
         "Current Long Exposure": None,
         "Current Short Exposure": None,
         "Gross Exposure": None,
+        "Net Exposure": None,
         "Remaining Capacity": None,
         "Capacity Available": False,
         "Capacity Error": None,
@@ -217,6 +252,7 @@ def summarize_portfolio(account_state, open_positions, current_prices):
                 "Current Long Exposure": exposure_summary["Current Long Exposure"],
                 "Current Short Exposure": exposure_summary["Current Short Exposure"],
                 "Gross Exposure": exposure_summary["Gross Exposure"],
+                "Net Exposure": exposure_summary["Net Exposure"],
                 "Remaining Capacity": exposure_summary["Remaining Capacity"],
                 "Capacity Available": True,
                 "Capacity Error": None,

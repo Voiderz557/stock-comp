@@ -22,11 +22,13 @@ from data.market_data import load_market_data
 from market.regime import load_current_market_regime
 from market.strategy_selector import describe_availability, recommend_strategy
 from paper_trading import storage as paper_storage
+from paper_trading.ledger import FAIL, INSOLVENCY, MARKET_BREACH, PASS, UNAVAILABLE
 from paper_trading.portfolio import (
     latest_close_prices,
     scan_for_candidates,
     summarize_portfolio,
 )
+from paper_trading.prices import SOURCE_LABEL, fetch_execution_snapshot
 from strategies.registry import (
     available_strategy_names,
     extra_strategy_benchmark_tickers,
@@ -38,7 +40,6 @@ from strategies.registry import (
 # Tunable, readable constants (not competition constraints - purely how much
 # history this page fetches for its own display purposes).
 # ---------------------------------------------------------------------------
-CURRENT_PRICE_LOOKBACK_CALENDAR_DAYS = 10
 TRADING_TO_CALENDAR_DAY_MULTIPLIER = 1.6
 SCAN_HISTORY_BUFFER_CALENDAR_DAYS = 30
 
@@ -68,14 +69,27 @@ closed_trades = paper_storage.get_closed_trades()
 
 position_tickers = sorted({position["ticker"] for position in open_positions})
 current_prices = {}
+price_quotes = {}
 if position_tickers:
-    today = pd.Timestamp.today().normalize()
-    lookback_start = today - pd.Timedelta(days=CURRENT_PRICE_LOOKBACK_CALENDAR_DAYS)
     try:
-        price_data, _cache_info = load_market_data(position_tickers, lookback_start, today)
-        current_prices = latest_close_prices(price_data)
+        snapshot = fetch_execution_snapshot(position_tickers, load_market_data)
+        current_prices = snapshot["prices"]
+        price_quotes = snapshot["quotes"]
     except Exception as error:
-        st.warning(f"Could not refresh live prices for open positions: {error}")
+        st.warning(
+            f"Could not refresh latest daily closes for open positions: {error}"
+        )
+
+st.caption(
+    f"Holdings and new executions use the {SOURCE_LABEL}. "
+    "This is not a real-time quote feed."
+)
+if price_quotes:
+    as_of_bits = [
+        f"{ticker} close as of {quote['as_of']}"
+        for ticker, quote in sorted(price_quotes.items())
+    ]
+    st.caption("Price timestamps (UTC): " + "; ".join(as_of_bits))
 
 summary = summarize_portfolio(account_state, open_positions, current_prices)
 
@@ -112,7 +126,8 @@ if summary["Capacity Available"]:
         "both this and available cash.",
     )
     st.caption(
-        f"Current short exposure ${summary['Current Short Exposure']:,.2f}. "
+        f"Current short exposure ${summary['Current Short Exposure']:,.2f}; "
+        f"net exposure ${summary['Net Exposure']:,.2f}. "
         "Market moves that push gross exposure above starting capital block "
         "new opens but never force a close."
     )
@@ -122,6 +137,37 @@ else:
     capacity_columns[3].metric("Remaining Capacity", "n/a")
     if summary["Capacity Error"]:
         st.warning(summary["Capacity Error"])
+
+audit = paper_storage.audit_ledger(current_prices)
+st.subheader("Ledger audit")
+audit_status = audit["Status"]
+if audit["Accounting"] == FAIL:
+    st.error(f"Accounting {FAIL}: stored ledger identities do not reconcile. Historical rows were not repaired.")
+elif audit_status == UNAVAILABLE:
+    st.warning(
+        f"Valuation {UNAVAILABLE}: some audit checks could not run without "
+        "a complete daily-close snapshot. Unavailable checks are not marked PASS."
+    )
+elif audit_status == MARKET_BREACH:
+    st.info(
+        "Gross exposure is above starting capital because prices moved. "
+        "This is not an accounting error and does not force a close."
+    )
+elif audit["Solvency"] == INSOLVENCY:
+    st.warning(
+        "Equity is negative (for example after a large short loss). "
+        "This is not an accounting error; new opens remain blocked if cash "
+        "or capacity is insufficient."
+    )
+else:
+    st.success("Accounting identities passed.")
+
+audit_table = pd.DataFrame(audit["Checks"])
+st.dataframe(audit_table, width="stretch", hide_index=True)
+st.caption(
+    f"Accounting={audit['Accounting']}; Valuation={audit['Valuation']}; "
+    f"Solvency={audit['Solvency']}. Unavailable checks are never treated as PASS."
+)
 
 st.subheader("Open Positions")
 if not summary["Open Positions"]:
@@ -184,21 +230,22 @@ else:
     with st.form("close_position_form"):
         selected_label = st.selectbox("Position to close", options=list(position_labels))
         close_submitted = st.form_submit_button("Close at latest available price")
-    if close_submitted:
-        position_id = position_labels[selected_label]
-        position = next(item for item in summary["Open Positions"] if item["id"] == position_id)
-        exit_price = current_prices.get(position["ticker"])
-        if exit_price is None:
-            st.error(
-                f"No current price available for {position['ticker']}; cannot close "
-                "this position right now."
-            )
-        else:
+        if close_submitted:
+            position_id = position_labels[selected_label]
+            position = next(item for item in summary["Open Positions"] if item["id"] == position_id)
             try:
-                realized_pnl = paper_storage.close_position(position_id, exit_price)
+                close_snapshot = fetch_execution_snapshot(
+                    [position["ticker"]], load_market_data
+                )
+                exit_quote = close_snapshot["quotes"][position["ticker"]]
+                realized_pnl = paper_storage.close_position(
+                    position_id, exit_quote["price"]
+                )
                 st.success(
-                    f"Closed #{position_id} {position['ticker']} at ${exit_price:,.2f} "
-                    f"(realized P&L ${realized_pnl:+,.2f})."
+                    f"Closed #{position_id} {position['ticker']} at "
+                    f"${exit_quote['price']:,.2f} ({exit_quote['source_label']} "
+                    f"as of {exit_quote['as_of']}; realized P&L "
+                    f"${realized_pnl:+,.2f})."
                 )
                 st.rerun()
             except Exception as error:
@@ -318,7 +365,9 @@ st.header("Ranked LONG Candidates")
 st.caption(
     f"Scans the configured universe ({len(STOCK_UNIVERSE)} tickers) using every "
     "registered strategy's own BUY signal and ranking - no strategy logic is "
-    "changed here."
+    "changed here. Candidate Price is the scan-time daily close and is "
+    f"informational only. Submitting an open fetches a new {SOURCE_LABEL} "
+    "for the chosen ticker and every existing holding."
 )
 
 if st.button("Scan configured universe"):
@@ -363,7 +412,7 @@ else:
                 {
                     "Ticker": row["Ticker"],
                     "Score": row["Score"],
-                    "Price": row.get("Price"),
+                    "Scan daily close (informational)": row.get("Price"),
                     "Signal": row["Signal"],
                     "Reason": row["Reason"],
                 }
@@ -371,7 +420,9 @@ else:
             ]
         )
         st.dataframe(
-            candidates_table.style.format({"Score": "{:.4f}", "Price": "${:,.2f}"}),
+            candidates_table.style.format(
+                {"Score": "{:.4f}", "Scan daily close (informational)": "${:,.2f}"}
+            ),
             width="stretch",
             hide_index=True,
         )
@@ -393,24 +444,34 @@ else:
 
         if open_submitted:
             chosen_result = next(row for row in rows if row["Ticker"] == chosen_ticker)
-            entry_price = chosen_result.get("Price")
-            if entry_price is None:
-                st.error(f"No price available for {chosen_ticker}; cannot open a position.")
-            else:
-                try:
-                    position_id = paper_storage.open_position(
-                        ticker=chosen_ticker,
-                        entry_price=entry_price,
-                        allocated_capital=allocation,
-                        strategy=strategy_name,
-                        reason=chosen_result.get("Reason", ""),
-                        direction="LONG",
-                        current_prices=current_prices,
+            holding_tickers = [position["ticker"] for position in paper_storage.get_open_positions()]
+            required_tickers = list(dict.fromkeys([chosen_ticker, *holding_tickers]))
+            try:
+                execution_snapshot = fetch_execution_snapshot(
+                    required_tickers, load_market_data
+                )
+                entry_quote = execution_snapshot["quotes"][chosen_ticker]
+                position_id = paper_storage.open_position(
+                    ticker=chosen_ticker,
+                    entry_price=entry_quote["price"],
+                    allocated_capital=allocation,
+                    strategy=strategy_name,
+                    reason=chosen_result.get("Reason", ""),
+                    direction="LONG",
+                    current_prices=execution_snapshot["prices"],
+                )
+                scan_price = chosen_result.get("Price")
+                scan_note = ""
+                if scan_price is not None and abs(float(scan_price) - entry_quote["price"]) > 1e-9:
+                    scan_note = (
+                        f" Scan-time informational close was ${float(scan_price):,.2f}."
                     )
-                    st.success(
-                        f"Opened paper position #{position_id}: {chosen_ticker} LONG at "
-                        f"${entry_price:,.2f} (${allocation:,.2f} allocated)."
-                    )
-                    st.rerun()
-                except Exception as error:
-                    st.error(f"Could not open position: {error}")
+                st.success(
+                    f"Opened paper position #{position_id}: {chosen_ticker} LONG at "
+                    f"${entry_quote['price']:,.2f} ({entry_quote['source_label']} "
+                    f"as of {entry_quote['as_of']}; ${allocation:,.2f} allocated)."
+                    + scan_note
+                )
+                st.rerun()
+            except Exception as error:
+                st.error(f"Could not open position: {error}")

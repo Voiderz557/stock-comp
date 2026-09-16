@@ -5,12 +5,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from paper_trading import storage
+from paper_trading.ledger import AccountingError, FAIL, INSOLVENCY, PASS
 from paper_trading.portfolio import compute_exposure_summary
+
+
+NO_PER_STOCK_CAP = 1_000_000.0
 
 
 class StorageTestCase(unittest.TestCase):
     def setUp(self):
-        self._tmp_dir = TemporaryDirectory()
+        self._tmp_dir = TemporaryDirectory(ignore_cleanup_errors=True)
         self.db_path = Path(self._tmp_dir.name) / "paper_portfolio_test.sqlite3"
 
     def tearDown(self):
@@ -21,6 +25,14 @@ class StorageTestCase(unittest.TestCase):
 
 
 class InitializationTests(StorageTestCase):
+    def test_initialize_rejects_non_positive_starting_capital(self):
+        with self.assertRaises(ValueError):
+            storage.initialize_storage(self.db_path, starting_capital=0)
+        with self.assertRaises(ValueError):
+            storage.initialize_storage(self.db_path, starting_capital=-1)
+        with self.assertRaises(RuntimeError):
+            storage.get_account_state(self.db_path)
+
     def test_initialize_seeds_account_state(self):
         self._init(starting_capital=50_000.0)
         account = storage.get_account_state(self.db_path)
@@ -103,6 +115,7 @@ class OpenPositionTests(StorageTestCase):
                 ticker="AAPL",
                 entry_price=200.0,
                 allocated_capital=1_000_000.0,
+                max_position_value=NO_PER_STOCK_CAP,
             )
         # No partial state change on rejection.
         self.assertEqual(storage.get_open_positions(self.db_path), [])
@@ -274,6 +287,7 @@ class SharedCapacityTests(StorageTestCase):
             entry_price=100.0,
             allocated_capital=60_000.0,
             current_prices={"TSLA": 200.0},
+            max_position_value=NO_PER_STOCK_CAP,
         )
         self.assertAlmostEqual(storage.get_account_state(self.db_path)["Cash"], 0.0)
 
@@ -284,6 +298,7 @@ class SharedCapacityTests(StorageTestCase):
             direction="LONG",
             entry_price=100.0,
             allocated_capital=70_000.0,
+            max_position_value=NO_PER_STOCK_CAP,
         )
         storage.open_position(
             db_path=self.db_path,
@@ -311,6 +326,7 @@ class SharedCapacityTests(StorageTestCase):
             direction="LONG",
             entry_price=100.0,
             allocated_capital=60_000.0,
+            max_position_value=NO_PER_STOCK_CAP,
         )
         with self.assertRaises(ValueError):
             storage.open_position(
@@ -331,6 +347,7 @@ class SharedCapacityTests(StorageTestCase):
             direction="LONG",
             entry_price=100.0,
             allocated_capital=40_000.0,
+            max_position_value=NO_PER_STOCK_CAP,
         )
         # 400 shares now worth $200: long exposure $80k, remaining capacity $20k,
         # cash still $60k.
@@ -363,6 +380,7 @@ class SharedCapacityTests(StorageTestCase):
             direction="LONG",
             entry_price=100.0,
             allocated_capital=90_000.0,
+            max_position_value=NO_PER_STOCK_CAP,
         )
         # 900 shares now worth $50: long exposure $45k, remaining capacity $55k,
         # cash only $10k.
@@ -385,6 +403,7 @@ class SharedCapacityTests(StorageTestCase):
             direction="LONG",
             entry_price=100.0,
             allocated_capital=80_000.0,
+            max_position_value=NO_PER_STOCK_CAP,
         )
         with self.assertRaises(ValueError):
             storage.open_position(
@@ -465,6 +484,7 @@ class SharedCapacityTests(StorageTestCase):
             direction="LONG",
             entry_price=100.0,
             allocated_capital=60_000.0,
+            max_position_value=NO_PER_STOCK_CAP,
         )
         storage.open_position(
             db_path=self.db_path,
@@ -507,6 +527,7 @@ class SharedCapacityTests(StorageTestCase):
                     entry_price=100.0,
                     allocated_capital=70_000.0,
                     current_prices={},
+                    max_position_value=NO_PER_STOCK_CAP,
                 )
                 successes.append(ticker)
             except Exception as error:
@@ -529,6 +550,223 @@ class SharedCapacityTests(StorageTestCase):
         self.assertAlmostEqual(
             storage.get_account_state(self.db_path)["Cash"], 30_000.0
         )
+
+
+class PurchaseConstraintTests(StorageTestCase):
+    def setUp(self):
+        super().setUp()
+        self._init(starting_capital=100_000.0)
+
+    def test_rejects_price_below_minimum(self):
+        with self.assertRaises(ValueError) as context:
+            storage.open_position(
+                db_path=self.db_path,
+                ticker="PENNY",
+                entry_price=4.0,
+                allocated_capital=400.0,
+            )
+        self.assertIn("minimum stock price", str(context.exception).lower())
+        self.assertEqual(storage.get_open_positions(self.db_path), [])
+        self.assertAlmostEqual(storage.get_account_state(self.db_path)["Cash"], 100_000.0)
+
+    def test_rejects_single_purchase_over_per_stock_cap(self):
+        with self.assertRaises(ValueError) as context:
+            storage.open_position(
+                db_path=self.db_path,
+                ticker="AAPL",
+                entry_price=100.0,
+                allocated_capital=20_000.01,
+            )
+        self.assertIn("purchase cap", str(context.exception).lower())
+        self.assertEqual(storage.get_open_positions(self.db_path), [])
+        self.assertAlmostEqual(storage.get_account_state(self.db_path)["Cash"], 100_000.0)
+
+    def test_repeated_purchases_cannot_bypass_per_stock_cap(self):
+        storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            entry_price=100.0,
+            allocated_capital=12_000.0,
+        )
+        with self.assertRaises(ValueError) as context:
+            storage.open_position(
+                db_path=self.db_path,
+                ticker="AAPL",
+                entry_price=100.0,
+                allocated_capital=9_000.0,
+                current_prices={"AAPL": 100.0},
+            )
+        self.assertIn("purchase cap", str(context.exception).lower())
+        self.assertEqual(len(storage.get_open_positions(self.db_path)), 1)
+        self.assertAlmostEqual(storage.get_account_state(self.db_path)["Cash"], 88_000.0)
+
+        storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            entry_price=100.0,
+            allocated_capital=8_000.0,
+            current_prices={"AAPL": 100.0},
+        )
+        self.assertEqual(len(storage.get_open_positions(self.db_path)), 2)
+        allocated = sum(row["allocated_capital"] for row in storage.get_open_positions(self.db_path))
+        self.assertAlmostEqual(allocated, 20_000.0)
+
+    def test_appreciation_does_not_force_a_sale(self):
+        position_id = storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            entry_price=100.0,
+            allocated_capital=18_000.0,
+        )
+        # 180 shares at $200 = $36,000 current market value, above the $20k cap.
+        audit = storage.audit_ledger({"AAPL": 200.0}, db_path=self.db_path)
+        self.assertEqual(len(storage.get_open_positions(self.db_path)), 1)
+        self.assertEqual(storage.get_open_positions(self.db_path)[0]["id"], position_id)
+        self.assertAlmostEqual(
+            audit["Exposure"]["Current Long Exposure"], 36_000.0
+        )
+        with self.assertRaises(ValueError):
+            storage.open_position(
+                db_path=self.db_path,
+                ticker="AAPL",
+                entry_price=200.0,
+                allocated_capital=1_000.0,
+                current_prices={"AAPL": 200.0},
+            )
+        self.assertEqual(len(storage.get_open_positions(self.db_path)), 1)
+
+    def test_additional_same_ticker_purchase_requires_current_price(self):
+        storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            entry_price=100.0,
+            allocated_capital=10_000.0,
+        )
+        with self.assertRaises(ValueError) as context:
+            storage.open_position(
+                db_path=self.db_path,
+                ticker="AAPL",
+                entry_price=100.0,
+                allocated_capital=1_000.0,
+            )
+        self.assertIn("purchase cap", str(context.exception).lower())
+        self.assertIn("missing or invalid", str(context.exception).lower())
+        self.assertEqual(len(storage.get_open_positions(self.db_path)), 1)
+        self.assertAlmostEqual(storage.get_account_state(self.db_path)["Cash"], 90_000.0)
+
+
+class LedgerAndRollbackTests(StorageTestCase):
+    def setUp(self):
+        super().setUp()
+        self._init(starting_capital=100_000.0)
+
+    def test_mixed_long_short_reconciliation(self):
+        storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            direction="LONG",
+            entry_price=100.0,
+            allocated_capital=10_000.0,
+        )
+        storage.open_position(
+            db_path=self.db_path,
+            ticker="TSLA",
+            direction="SHORT",
+            entry_price=200.0,
+            allocated_capital=20_000.0,
+            current_prices={"AAPL": 100.0},
+        )
+        report = storage.audit_ledger({"AAPL": 110.0, "TSLA": 180.0}, db_path=self.db_path)
+        self.assertEqual(report["Accounting"], PASS)
+        self.assertNotEqual(report["Valuation"], "UNAVAILABLE")
+        for check in report["Checks"]:
+            if check["Status"] == "UNAVAILABLE":
+                self.fail(f"Unexpected UNAVAILABLE marked alongside PASS: {check}")
+        self.assertAlmostEqual(report["Equity"], 103_000.0)
+
+    def test_large_short_loss_close_allows_negative_cash(self):
+        short_id = storage.open_position(
+            db_path=self.db_path,
+            ticker="TSLA",
+            direction="SHORT",
+            entry_price=100.0,
+            allocated_capital=20_000.0,
+        )
+        realized = storage.close_position(short_id, exit_price=1_000.0, db_path=self.db_path)
+        self.assertAlmostEqual(realized, -180_000.0)
+        account = storage.get_account_state(self.db_path)
+        self.assertAlmostEqual(account["Cash"], -80_000.0)
+        report = storage.audit_ledger({}, db_path=self.db_path)
+        self.assertEqual(report["Accounting"], PASS)
+        self.assertEqual(report["Solvency"], INSOLVENCY)
+        with self.assertRaises(ValueError):
+            storage.open_position(
+                db_path=self.db_path,
+                ticker="AAPL",
+                entry_price=100.0,
+                allocated_capital=1_000.0,
+            )
+
+    def test_corrupted_cash_fails_audit_and_open_rolls_back(self):
+        storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            entry_price=100.0,
+            allocated_capital=10_000.0,
+        )
+        connection = sqlite3.connect(self.db_path)
+        connection.execute("UPDATE account_state SET cash = 50000.0 WHERE id = 1")
+        connection.commit()
+        connection.close()
+        report = storage.audit_ledger({"AAPL": 100.0}, db_path=self.db_path)
+        self.assertEqual(report["Accounting"], FAIL)
+        with self.assertRaises(AccountingError):
+            storage.open_position(
+                db_path=self.db_path,
+                ticker="MSFT",
+                entry_price=100.0,
+                allocated_capital=1_000.0,
+                current_prices={"AAPL": 100.0},
+            )
+        self.assertEqual(len(storage.get_open_positions(self.db_path)), 1)
+        self.assertAlmostEqual(storage.get_account_state(self.db_path)["Cash"], 50_000.0)
+
+    def test_close_does_not_require_unrelated_prices(self):
+        long_id = storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            entry_price=100.0,
+            allocated_capital=10_000.0,
+        )
+        short_id = storage.open_position(
+            db_path=self.db_path,
+            ticker="TSLA",
+            direction="SHORT",
+            entry_price=200.0,
+            allocated_capital=10_000.0,
+            current_prices={"AAPL": 100.0},
+        )
+        realized = storage.close_position(short_id, exit_price=180.0, db_path=self.db_path)
+        self.assertAlmostEqual(realized, 1_000.0)
+        remaining = storage.get_open_positions(self.db_path)
+        self.assertEqual([row["id"] for row in remaining], [long_id])
+
+    def test_corrupted_cash_close_rolls_back(self):
+        position_id = storage.open_position(
+            db_path=self.db_path,
+            ticker="AAPL",
+            entry_price=100.0,
+            allocated_capital=10_000.0,
+        )
+        connection = sqlite3.connect(self.db_path)
+        connection.execute("UPDATE account_state SET cash = 50000.0 WHERE id = 1")
+        connection.commit()
+        connection.close()
+        with self.assertRaises(AccountingError):
+            storage.close_position(position_id, exit_price=110.0, db_path=self.db_path)
+        self.assertEqual(len(storage.get_open_positions(self.db_path)), 1)
+        self.assertEqual(storage.get_closed_trades(self.db_path), [])
+        self.assertAlmostEqual(storage.get_account_state(self.db_path)["Cash"], 50_000.0)
 
 
 if __name__ == "__main__":

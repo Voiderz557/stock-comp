@@ -8,6 +8,7 @@ from paper_trading.portfolio import (
     compute_exposure_summary,
     compute_position_metrics,
     latest_close_prices,
+    same_ticker_market_value,
     scan_for_candidates,
     summarize_portfolio,
 )
@@ -123,6 +124,7 @@ class SummarizePortfolioTests(unittest.TestCase):
         self.assertAlmostEqual(summary["Current Long Exposure"], 20_500.0)
         self.assertAlmostEqual(summary["Current Short Exposure"], 0.0)
         self.assertAlmostEqual(summary["Gross Exposure"], 20_500.0)
+        self.assertAlmostEqual(summary["Net Exposure"], 20_500.0)
         self.assertAlmostEqual(summary["Remaining Capacity"], 79_500.0)
 
     def test_missing_price_falls_back_to_entry_price_and_flags_it(self):
@@ -145,6 +147,7 @@ class SummarizePortfolioTests(unittest.TestCase):
         self.assertAlmostEqual(summary["Portfolio Value"], 100_000.0)
         self.assertFalse(summary["Capacity Available"])
         self.assertIsNone(summary["Gross Exposure"])
+        self.assertIsNone(summary["Net Exposure"])
         self.assertIsNone(summary["Remaining Capacity"])
         self.assertIn("missing current prices", summary["Capacity Error"].lower())
 
@@ -182,6 +185,7 @@ class ExposureSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(summary["Current Long Exposure"], 22_000.0)
         self.assertAlmostEqual(summary["Current Short Exposure"], 13_000.0)
         self.assertAlmostEqual(summary["Gross Exposure"], 35_000.0)
+        self.assertAlmostEqual(summary["Net Exposure"], 9_000.0)
         self.assertAlmostEqual(summary["Remaining Capacity"], 65_000.0)
 
     def test_remaining_capacity_floors_at_zero_when_prices_breach_ceiling(self):
@@ -197,6 +201,55 @@ class ExposureSummaryTests(unittest.TestCase):
         summary = compute_exposure_summary(positions, {"AAPL": 150.0}, 100_000.0)
         self.assertAlmostEqual(summary["Gross Exposure"], 120_000.0)
         self.assertAlmostEqual(summary["Remaining Capacity"], 0.0)
+
+    def test_same_ticker_market_value_aggregates_existing_lots(self):
+        positions = [
+            {
+                "ticker": "AAPL",
+                "direction": "LONG",
+                "entry_price": 100.0,
+                "quantity": 50.0,
+                "allocated_capital": 5_000.0,
+            },
+            {
+                "ticker": "AAPL",
+                "direction": "LONG",
+                "entry_price": 110.0,
+                "quantity": 40.0,
+                "allocated_capital": 4_400.0,
+            },
+            {
+                "ticker": "AAPL",
+                "direction": "SHORT",
+                "entry_price": 100.0,
+                "quantity": 10.0,
+                "allocated_capital": 1_000.0,
+            },
+            {
+                "ticker": "MSFT",
+                "direction": "LONG",
+                "entry_price": 50.0,
+                "quantity": 20.0,
+                "allocated_capital": 1_000.0,
+            },
+        ]
+        value = same_ticker_market_value(positions, "AAPL", "LONG", {"AAPL": 120.0, "MSFT": 50.0})
+        self.assertAlmostEqual(value, 10_800.0)
+
+    def test_same_ticker_market_value_rejects_missing_price(self):
+        positions = [
+            {
+                "ticker": "AAPL",
+                "direction": "LONG",
+                "entry_price": 100.0,
+                "quantity": 50.0,
+                "allocated_capital": 5_000.0,
+            }
+        ]
+        with self.assertRaises(ValueError) as context:
+            same_ticker_market_value(positions, "AAPL", "LONG", {})
+        self.assertIn("purchase cap", str(context.exception).lower())
+        self.assertIn("missing or invalid", str(context.exception).lower())
 
     def test_missing_price_raises_without_using_entry_price(self):
         positions = [

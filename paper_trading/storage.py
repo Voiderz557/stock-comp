@@ -26,7 +26,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from paper_trading.portfolio import compute_exposure_summary, position_notional_exposure
+from config import MAX_POSITION_VALUE, MIN_STOCK_PRICE
+from paper_trading.ledger import assert_accounting_consistent, reconcile_ledger
+from paper_trading.portfolio import (
+    compute_exposure_summary,
+    position_notional_exposure,
+    same_ticker_market_value,
+)
 
 
 DEFAULT_DB_PATH = "paper_trading_data/paper_portfolio.sqlite3"
@@ -190,6 +196,7 @@ def initialize_storage(db_path=None, starting_capital=STARTING_CAPITAL):
             "SELECT id FROM account_state WHERE id = 1"
         ).fetchone()
         if existing is None:
+            starting_capital = _require_finite_positive("starting_capital", starting_capital)
             connection.execute(
                 "INSERT INTO account_state "
                 "(id, cash, realized_pnl, updated_at, starting_capital) "
@@ -254,11 +261,62 @@ def get_closed_trades(db_path=None):
     return [dict(row) for row in rows]
 
 
+def audit_ledger(current_prices=None, db_path=None):
+    """Read-only reconciliation of the persisted paper ledger."""
+    return reconcile_ledger(
+        get_account_state(db_path),
+        get_open_positions(db_path),
+        get_closed_trades(db_path),
+        current_prices=current_prices,
+    )
+
+
 def _load_open_positions(connection):
     rows = connection.execute(
         "SELECT * FROM open_positions ORDER BY entry_timestamp ASC, id ASC"
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _load_closed_trades(connection):
+    rows = connection.execute(
+        "SELECT * FROM closed_trades ORDER BY exit_timestamp DESC, id DESC"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _account_from_row(row):
+    return {
+        "Cash": row["cash"],
+        "Realized P&L": row["realized_pnl"],
+        "Updated At": row["updated_at"],
+        "Starting Capital": row["starting_capital"],
+    }
+
+
+def _ledger_snapshot(connection):
+    try:
+        account_row = connection.execute(
+            "SELECT cash, realized_pnl, updated_at, starting_capital "
+            "FROM account_state WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        account_row = None
+    if account_row is None:
+        raise RuntimeError(
+            "Paper trading storage has not been initialized. "
+            "Call initialize_storage() first."
+        )
+    return (
+        _account_from_row(account_row),
+        _load_open_positions(connection),
+        _load_closed_trades(connection),
+    )
+
+
+def _assert_ledger_after_mutation(connection):
+    account, opens, closed = _ledger_snapshot(connection)
+    assert_accounting_consistent(account, opens, closed)
 
 
 def open_position(
@@ -271,6 +329,8 @@ def open_position(
     direction="LONG",
     entry_timestamp=None,
     current_prices=None,
+    min_stock_price=MIN_STOCK_PRICE,
+    max_position_value=MAX_POSITION_VALUE,
     db_path=None,
 ):
     """Open a simulated position, debiting cash and consuming shared capacity.
@@ -279,6 +339,12 @@ def open_position(
     with `entry_price`). Both LONG and SHORT debit `allocated_capital` from
     cash. A new open is also rejected unless it fits in remaining shared
     capacity, marked to market from `current_prices` (no entry-price fallback).
+
+    Competition purchase constraints (config.MIN_STOCK_PRICE /
+    MAX_POSITION_VALUE) are enforced here, not only in the UI. Repeated
+    LONG purchases of the same ticker are aggregated at current market
+    value plus the proposed purchase. Appreciation above the cap never
+    sells automatically.
     """
     if direction not in ("LONG", "SHORT"):
         raise ValueError("direction must be 'LONG' or 'SHORT'.")
@@ -315,13 +381,20 @@ def open_position(
         quantity = parsed_quantity
         allocated_capital = parsed_allocation
 
+    if min_stock_price is not None and entry_price < float(min_stock_price) - 1e-9:
+        raise ValueError(
+            f"Entry price ${entry_price:,.2f} is below the minimum stock price "
+            f"${float(min_stock_price):,.2f}."
+        )
+
     new_exposure = position_notional_exposure(quantity, entry_price)
     entry_timestamp = entry_timestamp or _now_iso()
 
     with _immediate_transaction(db_path) as connection:
         try:
             account_row = connection.execute(
-                "SELECT cash, starting_capital FROM account_state WHERE id = 1"
+                "SELECT cash, realized_pnl, updated_at, starting_capital "
+                "FROM account_state WHERE id = 1"
             ).fetchone()
         except sqlite3.OperationalError:
             account_row = None
@@ -339,6 +412,22 @@ def open_position(
             )
 
         open_positions = _load_open_positions(connection)
+        if direction == "LONG" and max_position_value is not None:
+            existing_value = same_ticker_market_value(
+                open_positions, ticker, "LONG", current_prices
+            )
+            proposed_total = existing_value + new_exposure
+            cap = float(max_position_value)
+            if proposed_total > cap + 1e-6:
+                raise ValueError(
+                    f"Per-stock purchase cap ${cap:,.2f} exceeded for {ticker}: "
+                    f"current market value of existing lots ${existing_value:,.2f} "
+                    f"plus this purchase ${new_exposure:,.2f} = ${proposed_total:,.2f}. "
+                    "Appreciation above the cap is allowed to remain open; "
+                    "additional purchases that would grow the position further "
+                    "are rejected. Nothing is sold automatically."
+                )
+
         exposure = compute_exposure_summary(
             open_positions, current_prices, account_row["starting_capital"]
         )
@@ -372,6 +461,7 @@ def open_position(
             "UPDATE account_state SET cash = cash - ?, updated_at = ? WHERE id = 1",
             (allocated_capital, _now_iso()),
         )
+        _assert_ledger_after_mutation(connection)
         return cursor.lastrowid
 
 
@@ -426,4 +516,5 @@ def close_position(position_id, exit_price, exit_timestamp=None, db_path=None):
             "WHERE id = 1",
             (proceeds, realized_pnl, _now_iso()),
         )
+        _assert_ledger_after_mutation(connection)
         return realized_pnl
