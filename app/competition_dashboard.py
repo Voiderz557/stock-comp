@@ -29,11 +29,38 @@ from paper_trading.portfolio import (
     summarize_portfolio,
 )
 from paper_trading.prices import SOURCE_LABEL, fetch_execution_snapshot
+from paper_trading.plan_store import (
+    DROPPED_CANDIDATE_NOTE,
+    compare_plans,
+    describe_plan_age,
+    detect_plan_staleness,
+    dismiss_recommendation,
+    execute_recommendation,
+    list_saved_plans,
+    load_plan,
+    previous_plan,
+    save_plan,
+)
+from ai.settings import ai_ui_enabled
+from ai.ui import render_ai_analysis_section
+from paper_trading.trading_plan import (
+    AUTOMATIC_MODE,
+    KEEP,
+    REVIEW_EXIT,
+    load_and_build_trading_plan,
+    plan_mode_options,
+    plan_to_csv,
+)
 from strategies.registry import (
     available_strategy_names,
     extra_strategy_benchmark_tickers,
     get_strategy,
 )
+
+try:
+    from app.account_setup_ui import render_account_setup_section
+except ImportError:
+    from account_setup_ui import render_account_setup_section
 
 
 # ---------------------------------------------------------------------------
@@ -52,10 +79,14 @@ st.set_page_config(page_title="Paper Trading Competition Dashboard", layout="wid
 st.title("Paper Trading Competition Dashboard")
 st.caption(
     "Every position on this page is simulated (paper trading only) and "
-    "persisted to a local database. Nothing here places a real order."
+    "persisted to a local database. Nothing here places a real order. "
+    "Recommendations are not trades until you record them."
 )
+st.caption(f"Saved portfolio and plans: `{paper_storage.paper_data_directory()}`")
 
 paper_storage.initialize_storage()
+
+render_account_setup_section()
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +115,8 @@ st.caption(
     f"Holdings and new executions use the {SOURCE_LABEL}. "
     "This is not a real-time quote feed."
 )
+if account_state.get("Snapshot As Of"):
+    st.caption(f"Competition account snapshot date: {account_state['Snapshot As Of']}")
 if price_quotes:
     as_of_bits = [
         f"{ticker} close as of {quote['as_of']}"
@@ -138,6 +171,83 @@ else:
     if summary["Capacity Error"]:
         st.warning(summary["Capacity Error"])
 
+saved_plan_index = list_saved_plans()
+latest_saved_plan = load_plan(saved_plan_index[0]["id"]) if saved_plan_index else None
+st.subheader("Latest saved plan")
+if latest_saved_plan is None:
+    st.info("No saved plan yet. Generate today's plan below. It will still be here after a restart.")
+else:
+    st.caption(describe_plan_age(latest_saved_plan))
+    stale, stale_reason = detect_plan_staleness(
+        latest_saved_plan, account_state, open_positions
+    )
+    if stale:
+        st.warning(stale_reason or "This plan needs to be regenerated.")
+    prior_plan = previous_plan(latest_saved_plan["id"])
+    plan_changes = compare_plans(prior_plan, latest_saved_plan)
+    buy_count = len(latest_saved_plan["buys"])
+    keep_count = sum(1 for row in latest_saved_plan["holdings"] if row["Action"] == KEEP)
+    exit_count = sum(
+        1 for row in latest_saved_plan["holdings"] if row["Action"] == REVIEW_EXIT
+    )
+    plan_counts = st.columns(3)
+    plan_counts[0].metric("Proposed buys", buy_count)
+    plan_counts[1].metric("Holdings to keep", keep_count)
+    plan_counts[2].metric("Exits to review", exit_count)
+    if latest_saved_plan["buys"]:
+        st.caption(
+            "Proposed buys: "
+            + ", ".join(row["Ticker"] for row in latest_saved_plan["buys"])
+        )
+    if keep_count:
+        st.caption(
+            "Keep: "
+            + ", ".join(
+                row["ticker"]
+                for row in latest_saved_plan["holdings"]
+                if row["Action"] == KEEP
+            )
+        )
+    if exit_count:
+        st.caption(
+            "Review exit: "
+            + ", ".join(
+                row["ticker"]
+                for row in latest_saved_plan["holdings"]
+                if row["Action"] == REVIEW_EXIT
+            )
+        )
+    st.markdown("**Changes since the previous plan**")
+    st.caption(DROPPED_CANDIDATE_NOTE)
+    if prior_plan is None:
+        st.caption("No previous plan to compare.")
+    else:
+        change_columns = st.columns(3)
+        change_columns[0].write(
+            "**New candidates:** "
+            + (
+                ", ".join(row["Ticker"] for row in plan_changes["new_candidates"])
+                or "none"
+            )
+        )
+        change_columns[1].write(
+            "**Dropped candidates (not sells):** "
+            + (
+                ", ".join(row["Ticker"] for row in plan_changes["dropped_candidates"])
+                or "none"
+            )
+        )
+        change_columns[2].write(
+            "**Signal changes:** "
+            + (
+                ", ".join(
+                    f"{row['Ticker']} {row['Previous Signal']} to {row['Current Signal']}"
+                    for row in plan_changes["signal_changes"]
+                )
+                or "none"
+            )
+        )
+
 audit = paper_storage.audit_ledger(current_prices)
 st.subheader("Ledger audit")
 audit_status = audit["Status"]
@@ -168,6 +278,12 @@ st.caption(
     f"Accounting={audit['Accounting']}; Valuation={audit['Valuation']}; "
     f"Solvency={audit['Solvency']}. Unavailable checks are never treated as PASS."
 )
+
+if ai_ui_enabled():
+    render_ai_analysis_section(
+        current_prices=current_prices,
+        price_quotes=price_quotes,
+    )
 
 st.subheader("Open Positions")
 if not summary["Open Positions"]:
@@ -356,6 +472,255 @@ if regime_result is not None:
         )
 else:
     st.caption("Click the button above to detect the current market regime.")
+
+
+# ---------------------------------------------------------------------------
+# Today's Trading Plan (recommendation only)
+# ---------------------------------------------------------------------------
+st.header("Today's Trading Plan")
+st.caption(
+    "Recommendation only: building a plan never opens or closes positions. "
+    f"Prices are the {SOURCE_LABEL}. Proposed REVIEW EXIT rows do not free "
+    "cash or capacity. Record a paper trade from a recommendation below to "
+    "refresh execution prices and recheck constraints. Manual open/close "
+    "forms remain available for one-off lots."
+)
+plan_mode = st.selectbox(
+    "Strategy for today's plan",
+    options=plan_mode_options(),
+    help=(
+        f"{AUTOMATIC_MODE} uses the existing regime-to-strategy selector "
+        "and its first available preferred strategy. It does not invent a "
+        "new ranking formula."
+    ),
+)
+if st.button("Build today's trading plan"):
+    status_box = st.empty()
+    progress = st.progress(0, text="Starting scan...")
+
+    def _plan_status(stage, detail=""):
+        text = f"{stage}: {detail}" if detail else stage
+        status_box.info(text)
+        if str(stage).lower().startswith("detect"):
+            progress.progress(0.2, text=text)
+        elif str(stage).lower().startswith("load"):
+            progress.progress(0.55, text=text)
+        else:
+            progress.progress(0.85, text=text)
+
+    try:
+        account_for_plan = paper_storage.get_account_state()
+        holdings_for_plan = paper_storage.get_open_positions()
+        plan = load_and_build_trading_plan(
+            plan_mode,
+            account_for_plan,
+            holdings_for_plan,
+            universe=STOCK_UNIVERSE,
+            load_market_data_fn=load_market_data,
+            status_callback=_plan_status,
+        )
+        save_plan(plan, account_for_plan, holdings_for_plan)
+        progress.progress(1.0, text="Plan saved")
+        status_box.empty()
+        st.rerun()
+    except Exception as error:
+        progress.progress(0)
+        st.error(f"Could not build today's trading plan: {error}")
+
+saved_plans = list_saved_plans()
+if not saved_plans:
+    plan = None
+    st.caption("Choose a strategy and build a plan to see keep / review / buy suggestions.")
+else:
+    plan_labels = {
+        (
+            f"{item['generated_at'][:10]} #{item['id']} "
+            f"{item['strategy_name'] or 'no strategy'}"
+            + (" (needs regeneration)" if item["needs_regeneration"] else "")
+        ): item["id"]
+        for item in saved_plans
+    }
+    selected_label = st.selectbox(
+        "Saved plans by date",
+        options=list(plan_labels),
+        help="Each generation is a new version. Older plans stay available.",
+    )
+    plan = load_plan(plan_labels[selected_label])
+
+if plan:
+    if plan.get("regime_name"):
+        st.write(f"**Detected regime:** {plan['regime_name']}")
+    if plan.get("strategy_name"):
+        st.write(f"**Selected strategy:** {plan['strategy_name']}")
+    else:
+        st.write("**Selected strategy:** none (no available preferred long strategy)")
+    st.write(f"**Why:** {plan.get('strategy_reason') or ''}")
+    recommendation = plan.get("recommendation")
+    if recommendation is not None:
+        for note in recommendation.notes:
+            st.info(note)
+    st.caption(f"Candidate and holding prices are the {plan['price_source']}.")
+
+    st.subheader("Proposed buys")
+    if plan["buys"]:
+        buys_table = pd.DataFrame(
+            [
+                {
+                    "Ticker": row["Ticker"],
+                    "Latest daily close": row["Price"],
+                    "Close as of (UTC)": row["Price As Of"],
+                    "Score": row["Score"],
+                    "Suggested quantity": row["Quantity"],
+                    "Dollar allocation": row["Allocation"],
+                    "Reason": row["Reason"],
+                }
+                for row in plan["buys"]
+            ]
+        )
+        st.dataframe(
+            buys_table.style.format(
+                {
+                    "Latest daily close": "${:,.2f}",
+                    "Score": "{:.4f}",
+                    "Suggested quantity": "{:,.4f}",
+                    "Dollar allocation": "${:,.2f}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        st.info(plan.get("no_purchase_explanation") or "No purchases qualify.")
+    if plan.get("skipped_buys"):
+        with st.expander("Candidates not allocated", expanded=False):
+            st.dataframe(pd.DataFrame(plan["skipped_buys"]), width="stretch", hide_index=True)
+    if plan.get("unavailable_universe"):
+        st.caption(
+            "Unavailable universe tickers (not treated as sells): "
+            + ", ".join(plan["unavailable_universe"])
+        )
+
+    leftover_columns = st.columns(2)
+    leftover_columns[0].metric("Cash after proposed buys", f"${plan['cash_after']:,.2f}")
+    if plan["remaining_capacity_after"] is not None:
+        leftover_columns[1].metric(
+            "Capacity after proposed buys",
+            f"${plan['remaining_capacity_after']:,.2f}",
+        )
+    else:
+        leftover_columns[1].metric("Capacity after proposed buys", "n/a")
+
+    st.subheader("Existing holdings")
+    if not plan["holdings"]:
+        st.caption("No open paper positions to review.")
+    else:
+        holdings_table = pd.DataFrame(
+            [
+                {
+                    "ID": row.get("id"),
+                    "Ticker": row.get("ticker"),
+                    "Direction": row.get("direction"),
+                    "Action": row.get("Action"),
+                    "Signal": row.get("Signal"),
+                    "Latest daily close": row.get("Price"),
+                    "Close as of (UTC)": row.get("Price As Of"),
+                    "Reason": row.get("Reason"),
+                }
+                for row in plan["holdings"]
+            ]
+        )
+        st.dataframe(
+            holdings_table.style.format({"Latest daily close": "${:,.2f}"}),
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption(
+            "KEEP means BUY or WAIT. REVIEW EXIT is an AVOID signal only. "
+            "UNAVAILABLE never implies an exit. Proposed exits are not assumed done."
+        )
+
+    if plan.get("data_warnings"):
+        with st.expander("Data warnings", expanded=False):
+            for warning in plan["data_warnings"]:
+                st.write(warning)
+    st.download_button(
+        "Download plan CSV",
+        data=plan_to_csv(plan),
+        file_name="todays_trading_plan.csv",
+        mime="text/csv",
+    )
+
+    is_latest = bool(saved_plans) and plan["id"] == saved_plans[0]["id"]
+    live_account = paper_storage.get_account_state()
+    live_positions = paper_storage.get_open_positions()
+    plan_is_stale, plan_stale_reason = detect_plan_staleness(
+        plan, live_account, live_positions
+    )
+    actionable = []
+    for row in plan["buys"]:
+        if row.get("status") == "OPEN":
+            actionable.append(
+                (
+                    row["recommendation_id"],
+                    f"BUY {row['Ticker']} ${row['Allocation']:,.2f}",
+                )
+            )
+    for row in plan["holdings"]:
+        if row.get("status") == "OPEN" and row.get("Action") == REVIEW_EXIT:
+            actionable.append(
+                (
+                    row["recommendation_id"],
+                    f"REVIEW EXIT {row['ticker']} position #{row.get('id')}",
+                )
+            )
+    if not is_latest:
+        st.caption("This is an older plan. Record trades from the latest plan only.")
+    elif plan_is_stale:
+        st.warning(
+            (plan_stale_reason or "This plan needs regeneration.")
+            + " Generate a new plan before recording another trade. "
+            "Saved recommendations are not trades."
+        )
+    elif not actionable:
+        st.caption("No open BUY or REVIEW EXIT recommendations left on this plan.")
+    else:
+        action_labels = {label: recommendation_id for recommendation_id, label in actionable}
+        with st.form("record_plan_trade"):
+            chosen_action = st.selectbox(
+                "Recommendation to record",
+                options=list(action_labels),
+            )
+            record_submitted = st.form_submit_button("Record paper trade")
+        if record_submitted:
+            recommendation_id = action_labels[chosen_action]
+            try:
+                result = execute_recommendation(
+                    recommendation_id,
+                    lambda tickers: fetch_execution_snapshot(tickers, load_market_data),
+                )
+                st.success(
+                    f"Recorded {result['trade_kind']} #{result['trade_id']} at "
+                    f"${result['execution_price']:,.2f} ({SOURCE_LABEL}). "
+                    "This plan now needs regeneration because the account snapshot changed."
+                )
+                st.rerun()
+            except Exception as error:
+                st.error(f"Could not record the paper trade: {error}")
+        with st.form("dismiss_plan_recommendation"):
+            dismiss_choice = st.selectbox(
+                "Recommendation to dismiss",
+                options=list(action_labels),
+                key="dismiss_recommendation_choice",
+            )
+            dismiss_note = st.text_input("Optional dismissal note")
+            dismiss_submitted = st.form_submit_button("Dismiss recommendation")
+        if dismiss_submitted:
+            try:
+                dismiss_recommendation(action_labels[dismiss_choice], dismiss_note)
+                st.success("Recommendation dismissed. It was not recorded as a trade.")
+                st.rerun()
+            except Exception as error:
+                st.error(f"Could not dismiss the recommendation: {error}")
 
 
 # ---------------------------------------------------------------------------

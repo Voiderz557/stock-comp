@@ -21,7 +21,10 @@ every new open:
 """
 
 import math
+import os
+import shutil
 import sqlite3
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +38,7 @@ from paper_trading.portfolio import (
 )
 
 
+PAPER_DATA_DIR = "paper_trading_data"
 DEFAULT_DB_PATH = "paper_trading_data/paper_portfolio.sqlite3"
 STARTING_CAPITAL = 100_000.0
 _CONNECT_TIMEOUT_SECONDS = 30.0
@@ -80,7 +84,28 @@ def _resolve_project_path(path):
 
 
 def _resolve_db_path(db_path=None):
-    return _resolve_project_path(db_path or DEFAULT_DB_PATH)
+    if db_path is not None:
+        return _resolve_project_path(db_path)
+    env_db = os.environ.get("STOCK_COMP_PAPER_DB")
+    if env_db:
+        return Path(env_db).resolve()
+    env_dir = os.environ.get("STOCK_COMP_PAPER_DATA_DIR")
+    if env_dir:
+        return (Path(env_dir) / "paper_portfolio.sqlite3").resolve()
+    if getattr(sys, "frozen", False):
+        local_app = os.environ.get("LOCALAPPDATA")
+        root = (
+            Path(local_app) / "StockComp"
+            if local_app
+            else Path.home() / "AppData" / "Local" / "StockComp"
+        )
+        return (root / PAPER_DATA_DIR / "paper_portfolio.sqlite3").resolve()
+    return _resolve_project_path(DEFAULT_DB_PATH)
+
+
+def paper_data_directory(db_path=None):
+    """Local directory that holds the paper ledger and saved trading plans."""
+    return _resolve_db_path(db_path).parent
 
 
 def _connect(db_path=None):
@@ -159,6 +184,8 @@ def initialize_storage(db_path=None, starting_capital=STARTING_CAPITAL):
             connection.execute(
                 "ALTER TABLE account_state ADD COLUMN starting_capital REAL"
             )
+        if "snapshot_as_of" not in account_columns:
+            connection.execute("ALTER TABLE account_state ADD COLUMN snapshot_as_of TEXT")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS open_positions (
@@ -192,6 +219,9 @@ def initialize_storage(db_path=None, starting_capital=STARTING_CAPITAL):
             )
             """
         )
+        from paper_trading.plan_store import ensure_plan_schema
+
+        ensure_plan_schema(connection)
         existing = connection.execute(
             "SELECT id FROM account_state WHERE id = 1"
         ).fetchone()
@@ -209,15 +239,21 @@ def initialize_storage(db_path=None, starting_capital=STARTING_CAPITAL):
 
 
 def get_account_state(db_path=None):
-    """Return {Cash, Realized P&L, Starting Capital, Updated At}."""
+    """Return {Cash, Realized P&L, Starting Capital, Updated At, Snapshot As Of}."""
     connection = _connect(db_path)
     try:
         row = connection.execute(
-            "SELECT cash, realized_pnl, updated_at, starting_capital "
+            "SELECT cash, realized_pnl, updated_at, starting_capital, snapshot_as_of "
             "FROM account_state WHERE id = 1"
         ).fetchone()
     except sqlite3.OperationalError:
-        row = None
+        try:
+            row = connection.execute(
+                "SELECT cash, realized_pnl, updated_at, starting_capital "
+                "FROM account_state WHERE id = 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
     finally:
         connection.close()
     if row is None:
@@ -225,11 +261,13 @@ def get_account_state(db_path=None):
             "Paper trading storage has not been initialized. "
             "Call initialize_storage() first."
         )
+    as_of = row["snapshot_as_of"] if "snapshot_as_of" in row.keys() else None
     return {
         "Cash": row["cash"],
         "Realized P&L": row["realized_pnl"],
         "Updated At": row["updated_at"],
         "Starting Capital": row["starting_capital"],
+        "Snapshot As Of": as_of,
     }
 
 
@@ -462,13 +500,37 @@ def open_position(
             (allocated_capital, _now_iso()),
         )
         _assert_ledger_after_mutation(connection)
+        _mark_latest_plan_needs_regeneration(
+            connection,
+            "Account snapshot changed after a recorded paper open.",
+        )
         return cursor.lastrowid
 
 
-def close_position(position_id, exit_price, exit_timestamp=None, db_path=None):
+def _mark_latest_plan_needs_regeneration(connection, reason):
+    """Flag the newest saved plan after a ledger mutation in this transaction.
+
+    No-op when no plan has been saved. Does not delete plans or positions.
+    """
+    try:
+        row = connection.execute(
+            "SELECT id, needs_regeneration FROM trading_plans ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return
+    if row is None or row["needs_regeneration"]:
+        return
+    connection.execute(
+        "UPDATE trading_plans SET needs_regeneration = 1, stale_reason = ? WHERE id = ?",
+        (reason, row["id"]),
+    )
+
+
+def close_position(position_id, exit_price, exit_timestamp=None, db_path=None, return_id=False):
     """Close an open position at `exit_price`, crediting cash and realized P&L.
 
     Returns the realized P&L (positive = paper profit) for this trade.
+    Pass `return_id=True` to also receive the new closed-trade row id.
     Closing is always allowed even if mark-to-market gross exposure is
     already above starting capital - this never forces liquidation, it only
     records an explicit close.
@@ -490,7 +552,7 @@ def close_position(position_id, exit_price, exit_timestamp=None, db_path=None):
             realized_pnl = (position["entry_price"] - exit_price) * position["quantity"]
         proceeds = position["allocated_capital"] + realized_pnl
 
-        connection.execute(
+        closed_cursor = connection.execute(
             "INSERT INTO closed_trades "
             "(ticker, direction, entry_price, exit_price, quantity, "
             "allocated_capital, entry_timestamp, exit_timestamp, realized_pnl, "
@@ -517,4 +579,94 @@ def close_position(position_id, exit_price, exit_timestamp=None, db_path=None):
             (proceeds, realized_pnl, _now_iso()),
         )
         _assert_ledger_after_mutation(connection)
+        _mark_latest_plan_needs_regeneration(
+            connection,
+            "Account snapshot changed after a recorded paper close.",
+        )
+        closed_trade_id = closed_cursor.lastrowid
+        if return_id:
+            return realized_pnl, closed_trade_id
         return realized_pnl
+
+
+SNAPSHOT_STRATEGY = "Account snapshot"
+SNAPSHOT_REASON = (
+    "Imported competition holding (account snapshot, not a recorded paper trade)."
+)
+
+
+def backup_ledger(db_path=None):
+    """Copy the SQLite ledger next to the live file. Never deletes the source."""
+    source = _resolve_db_path(db_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"No paper ledger to back up at {source}.")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = source.parent / "backups" / f"paper_portfolio_{stamp}.sqlite3"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return destination
+
+
+def replace_account_snapshot(
+    starting_capital,
+    cash,
+    holdings,
+    snapshot_as_of,
+    db_path=None,
+    create_backup=True,
+):
+    """Replace live cash/holdings with a competition snapshot.
+
+    Closed-trade history and its realized P&L are kept. No balancing
+    trades are invented. Callers must already satisfy cash identity.
+    """
+    starting_capital = _require_finite_positive("starting_capital", starting_capital)
+    if cash is None:
+        raise ValueError("cash is required.")
+    try:
+        cash = float(cash)
+    except (TypeError, ValueError) as error:
+        raise ValueError("cash must be a finite number.") from error
+    if not math.isfinite(cash):
+        raise ValueError("cash must be a finite number.")
+    if snapshot_as_of is None or not str(snapshot_as_of).strip():
+        raise ValueError("Account snapshot date is required.")
+    snapshot_as_of = str(snapshot_as_of).strip()
+
+    backup_path = backup_ledger(db_path) if create_backup else None
+    with _immediate_transaction(db_path) as connection:
+        account, _opens, closed = _ledger_snapshot(connection)
+        realized = float(account["Realized P&L"] or 0.0)
+        connection.execute(
+            "UPDATE account_state "
+            "SET cash = ?, starting_capital = ?, snapshot_as_of = ?, updated_at = ? "
+            "WHERE id = 1",
+            (cash, starting_capital, snapshot_as_of, _now_iso()),
+        )
+        connection.execute("DELETE FROM open_positions")
+        for holding in holdings:
+            connection.execute(
+                "INSERT INTO open_positions "
+                "(ticker, direction, entry_price, quantity, allocated_capital, "
+                "entry_timestamp, strategy, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    holding["ticker"],
+                    holding["direction"],
+                    holding["entry_price"],
+                    holding["quantity"],
+                    holding["allocated_capital"],
+                    snapshot_as_of,
+                    SNAPSHOT_STRATEGY,
+                    SNAPSHOT_REASON,
+                ),
+            )
+        _assert_ledger_after_mutation(connection)
+        _mark_latest_plan_needs_regeneration(
+            connection,
+            "Account snapshot was replaced from a manual competition setup.",
+        )
+    return {
+        "backup": None if backup_path is None else str(backup_path),
+        "realized_pnl": realized,
+        "closed_trade_count": len(closed),
+    }

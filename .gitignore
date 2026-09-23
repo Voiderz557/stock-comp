@@ -4,6 +4,9 @@ __pycache__/
 .env
 data_cache/
 .pytest_cache/
+build/
+dist/
+.desktop_exe_verify/
 
 # Runtime/generated data - never commit, but never delete locally either.
 *.sqlite3

@@ -2,8 +2,10 @@
 
 import json
 import logging
+import os
 import queue
 import shutil
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +49,20 @@ def _resolve_project_path(path):
 
 
 def _resolve_cache_dir(cache_dir=None):
-    return _resolve_project_path(cache_dir or MARKET_DATA_CACHE_DIR)
+    if cache_dir is not None:
+        return _resolve_project_path(cache_dir)
+    env_dir = os.environ.get("STOCK_COMP_CACHE_DIR")
+    if env_dir:
+        return Path(env_dir).resolve()
+    if getattr(sys, "frozen", False):
+        local_app = os.environ.get("LOCALAPPDATA")
+        root = (
+            Path(local_app) / "StockComp"
+            if local_app
+            else Path.home() / "AppData" / "Local" / "StockComp"
+        )
+        return (root / "data_cache").resolve()
+    return _resolve_project_path(MARKET_DATA_CACHE_DIR)
 
 
 def _cache_path(cache_dir, ticker):
