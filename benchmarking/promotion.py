@@ -64,6 +64,7 @@ def evaluate_promotion(
     best_existing_method_name,
     ml_period_returns,
     leakage_audit_is_valid=True,
+    coverage_is_valid=True,
 ):
     """Apply the promotion gate to one ML method's aggregate metrics.
 
@@ -80,6 +81,19 @@ def evaluate_promotion(
             reasons=(
                 "Leakage audit FAILED: this benchmark is marked INVALID. "
                 "No PROMOTE recommendation can be produced.",
+            ),
+        )
+
+    if not coverage_is_valid:
+        return PromotionResult(
+            method=method_name,
+            compared_against=best_existing_method_name,
+            decision=INVALID,
+            criteria={},
+            reasons=(
+                "Required historical price coverage is incomplete: historically "
+                "valid constituents are missing provider data. Results are not "
+                "valid or promotable. Constituents were not dropped to hide the gap.",
             ),
         )
 

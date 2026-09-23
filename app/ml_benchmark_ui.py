@@ -87,12 +87,14 @@ with st.form("benchmark_settings"):
 
     period_col_4, period_col_5 = st.columns(2)
     with period_col_4:
-        number_of_tests = st.selectbox(
+        number_of_tests = st.number_input(
             "Number of Tests",
-            options=[20, 50, 100],
-            index=0,
+            min_value=1,
+            value=5,
+            step=1,
             help="Robustness testing: more tests give a more reliable read "
-            "on whether performance depends on a few extreme winners.",
+            "on whether performance depends on a few extreme winners. "
+            "Any positive integer is allowed; there is no maximum.",
         )
     with period_col_5:
         random_seed = st.number_input("Random Seed", value=42, step=1)
@@ -190,8 +192,36 @@ if run_button:
             )
             progress = st.progress(0, text="Starting benchmark...")
 
-            def _progress(completed, total):
-                progress.progress(completed / total, text=f"Period {completed}/{total}...")
+            def _progress(event):
+                if not isinstance(event, dict):
+                    return
+                completed = event.get("completed") or 0
+                total = event.get("total") or 1
+                stage = event.get("stage") or ""
+                if stage == "complete":
+                    fraction = 1.0
+                else:
+                    finished = max(0, completed - 1)
+                    fraction = finished / total if total else 0.0
+                elapsed = event.get("elapsed_seconds") or 0.0
+                period_elapsed = event.get("period_elapsed_seconds")
+                bits = []
+                if completed:
+                    bits.append(f"Period {completed}/{total}")
+                else:
+                    bits.append(f"Setup ({total} period(s))")
+                if event.get("period_start") and event.get("period_end"):
+                    bits.append(f"{event['period_start']} to {event['period_end']}")
+                if stage:
+                    bits.append(stage)
+                if event.get("method"):
+                    bits.append(str(event["method"]))
+                if event.get("detail"):
+                    bits.append(str(event["detail"]))
+                bits.append(f"{elapsed:.0f}s elapsed")
+                if completed and period_elapsed is not None:
+                    bits.append(f"{period_elapsed:.0f}s this period")
+                progress.progress(min(1.0, max(0.0, fraction)), text=" | ".join(bits))
 
             result = run_benchmark(
                 duration=duration,
@@ -232,7 +262,8 @@ st.caption(
     f"Effective {cfg.get('evaluation_start_date')} → {cfg.get('evaluation_end_date')} | "
     f"Training floor {cfg.get('effective_training_start_floor')} | "
     f"Tests {cfg.get('number_of_tests')} | Seed {cfg.get('random_seed')} | "
-    f"Valid ML folds {cfg.get('ml_fold_summary')}"
+    f"Valid ML folds {cfg.get('ml_fold_summary')} | "
+    f"Benchmark valid {cfg.get('benchmark_valid')}"
 )
 
 if result.unavailable_strategies:
@@ -240,6 +271,37 @@ if result.unavailable_strategies:
         "Not yet implemented, so excluded from this run: "
         + ", ".join(result.unavailable_strategies)
     )
+
+# ---------------------------------------------------------------------------
+# Historical data coverage (missing provider rows are not dropped from the universe)
+# ---------------------------------------------------------------------------
+st.header("Historical Data Coverage")
+coverage = result.data_coverage or {}
+coverage_failures = coverage.get("Data Source Failures") or []
+unavailable_constituents = coverage.get("Unavailable Valid Constituents") or []
+if coverage.get("Coverage Is Valid", not coverage_failures):
+    st.success("Required historical constituents have provider coverage for this run.")
+else:
+    st.error(
+        "Required historical price data is missing for one or more historically "
+        "valid constituents. Those tickers were kept in the universe; affected "
+        "results are not valid or promotable."
+    )
+    if unavailable_constituents:
+        st.write(
+            "**Unavailable valid constituents:** " + ", ".join(unavailable_constituents)
+        )
+    if coverage_failures:
+        st.dataframe(pd.DataFrame(coverage_failures), width="stretch", hide_index=True)
+    diagnosis = coverage.get("Coverage Diagnosis") or []
+    if diagnosis:
+        st.subheader("Coverage diagnosis")
+        st.dataframe(pd.DataFrame(diagnosis), width="stretch", hide_index=True)
+
+stage_timings = cfg.get("stage_timings") or []
+if stage_timings:
+    with st.expander("Stage timings", expanded=False):
+        st.dataframe(pd.DataFrame(stage_timings), width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------------------
 # Leakage audit (shown first - an INVALID audit means no promotion recommendation)
@@ -293,6 +355,11 @@ else:
         cmap="Greens",
     )
     st.caption(f"**{highlight_column}** is the headline competition metric - highlighted above.")
+    if not cfg.get("coverage_is_valid", True) or not cfg.get("leakage_audit_is_valid", True):
+        st.warning(
+            "These tables are shown for diagnosis only. Coverage or leakage "
+            "failures make this run invalid; nothing here is promotable."
+        )
     st.dataframe(styled, width="stretch", hide_index=True)
 
     with st.expander("Robustness Statistics (Trimmed Mean / Percentiles)", expanded=False):
@@ -387,6 +454,11 @@ else:
 st.header("Export")
 if not result.leakage_audit.get("Is Valid", False):
     st.warning("This package is marked INVALID because the leakage audit failed.")
+if not cfg.get("coverage_is_valid", True):
+    st.warning(
+        "This package is marked INVALID because required historical price "
+        "coverage is incomplete. Delisted/historical constituents were not removed."
+    )
 zip_bytes = build_benchmark_zip(result)
 st.download_button(
     "Download Full Benchmark Package (ZIP)",

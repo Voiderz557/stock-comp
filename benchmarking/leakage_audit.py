@@ -100,24 +100,40 @@ def _check_no_train_validation_overlap(trained_folds):
     )
 
 
-def _check_fitted_on_training_rows_only(price_data, universe, trained_folds):
+def _check_fitted_on_training_rows_only(
+    price_data, universe, trained_folds, progress_callback=None, dataset_universe=None
+):
     """Rebuild each sampled fold's training set and confirm it matches exactly.
 
     This proves the model/preprocessor were fit on precisely the rows built
     from `[training_start, training_end]` - not on anything from the
     validation period - by deterministically re-deriving that same
     training set from the same underlying (unmodified) price data and
-    comparing row counts and date bounds.
+    comparing row counts and date bounds. `dataset_universe` must match the
+    universe used during training (`None` means point-in-time Nasdaq-100).
+    Models that share a training window reuse one rebuilt dataset.
     """
+    if dataset_universe is None:
+        dataset_universe = universe
     violations = []
-    for fold in trained_folds[:MAX_FOLDS_TO_REVERIFY]:
-        dataset = build_feature_dataset(
-            fold.training_start,
-            fold.training_end,
-            universe=universe,
-            rebalance_frequency="weekly",
-            price_data=price_data,
-        )
+    rebuilt_datasets = {}
+    sampled = trained_folds[:MAX_FOLDS_TO_REVERIFY]
+    for index, fold in enumerate(sampled, start=1):
+        if progress_callback:
+            progress_callback(
+                f"rebuilding training fold {index}/{len(sampled)} "
+                f"({fold.model_name} to {fold.period_start.date()})"
+            )
+        rebuild_key = (pd.Timestamp(fold.training_start), pd.Timestamp(fold.training_end))
+        if rebuild_key not in rebuilt_datasets:
+            rebuilt_datasets[rebuild_key] = build_feature_dataset(
+                fold.training_start,
+                fold.training_end,
+                universe=dataset_universe,
+                rebalance_frequency="weekly",
+                price_data=price_data,
+            )
+        dataset = rebuilt_datasets[rebuild_key]
         supervised = get_supervised_subset(dataset, TRAINING_TARGET_COLUMN)
         if len(supervised) != fold.training_rows:
             violations.append(
@@ -133,8 +149,16 @@ def _check_fitted_on_training_rows_only(price_data, universe, trained_folds):
     return violations
 
 
-def _check_preprocessor_and_model_fitted_on_training_only(price_data, universe, trained_folds):
-    violations = _check_fitted_on_training_rows_only(price_data, universe, trained_folds)
+def _check_preprocessor_and_model_fitted_on_training_only(
+    price_data, universe, trained_folds, progress_callback=None, dataset_universe=None
+):
+    violations = _check_fitted_on_training_rows_only(
+        price_data,
+        universe,
+        trained_folds,
+        progress_callback=progress_callback,
+        dataset_universe=dataset_universe,
+    )
     detail = (
         "Re-derived training rows for every sampled fold match the rows actually "
         "used to fit the pipeline (same row count, no dates past training_end)."
@@ -264,15 +288,33 @@ def _check_feature_timestamp_leq_prediction_timestamp(price_data, universe, trai
     )
 
 
-def run_leakage_audit(trained_folds, price_data, universe, feature_columns):
+def run_leakage_audit(
+    trained_folds,
+    price_data,
+    universe,
+    feature_columns,
+    progress_callback=None,
+    dataset_universe=None,
+):
     """Run every leakage check and return `{"Checks": [...], "Is Valid": bool}`.
 
     `trained_folds` is the full list of `TrainedMLFold`s produced across all
     ML models/periods in one benchmark run; `price_data`/`universe` are the
     same inputs used to train and simulate; `feature_columns` is any one
     fold's numeric feature-column list (all folds share the same
-    `infer_feature_columns` derivation).
+    `infer_feature_columns` derivation). `dataset_universe` must match the
+    universe used to build training rows (`None` means point-in-time
+    Nasdaq-100). `universe` may be a smaller spot-check list for per-ticker
+    probes.
     """
+    if dataset_universe is None:
+        dataset_universe = universe
+
+    def _notify(detail):
+        if progress_callback:
+            progress_callback(detail)
+
+    _notify("feature timestamp check")
     checks = [
         _run_check_safely(
             "Feature timestamp <= prediction timestamp",
@@ -280,24 +322,40 @@ def run_leakage_audit(trained_folds, price_data, universe, feature_columns):
                 price_data, universe, trained_folds
             ),
         ),
+    ]
+    _notify("training-before-validation check")
+    checks.append(
         _run_check_safely(
             "Training dates strictly before validation/period dates",
             lambda: _check_training_before_validation(trained_folds),
-        ),
+        )
+    )
+    _notify("label-horizon feature check")
+    checks.append(
         _run_check_safely(
             "Label horizon never enters training features",
             lambda: _check_label_horizon_excluded_from_features(feature_columns),
-        ),
+        )
+    )
+    _notify("future-row shock check")
+    checks.append(
         _run_check_safely(
             "Future rows cannot alter earlier predictions",
             lambda: _check_future_rows_cannot_alter_earlier_predictions(
                 price_data, universe, trained_folds
             ),
-        ),
-    ]
+        )
+    )
+    _notify("rebuilding training folds for preprocessor/model fit checks")
     try:
         checks.extend(
-            _check_preprocessor_and_model_fitted_on_training_only(price_data, universe, trained_folds)
+            _check_preprocessor_and_model_fitted_on_training_only(
+                price_data,
+                universe,
+                trained_folds,
+                progress_callback=_notify,
+                dataset_universe=dataset_universe,
+            )
         )
     except Exception as error:  # noqa: BLE001 - fail closed rather than crash the whole audit
         failure_detail = (
@@ -306,6 +364,7 @@ def run_leakage_audit(trained_folds, price_data, universe, feature_columns):
         )
         checks.append(_check("Scaler/preprocessor fitted on training data only", False, failure_detail))
         checks.append(_check("Model fitted on training data only", False, failure_detail))
+    _notify("train/validation overlap check")
     checks.append(
         _run_check_safely(
             "No overlap between train and validation windows",

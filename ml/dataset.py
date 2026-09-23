@@ -46,6 +46,7 @@ from ml.features import (
     REQUIRED_HISTORY_DAYS,
     InsufficientHistoryError,
     compute_feature_row,
+    register_price_universe,
     truncate_to_as_of,
 )
 from ml.labels import FORWARD_RETURN_HORIZONS_DAYS, compute_labels, forward_return_column
@@ -95,6 +96,93 @@ def _universe_for_date(date, fixed_universe, superset):
         return fixed_universe
     snapshot_tickers = set(get_historical_universe(date).tickers)
     return [ticker for ticker in superset if ticker in snapshot_tickers]
+
+
+def _build_one_ticker_row(
+    ticker,
+    feature_date,
+    ticker_full,
+    spy_hist,
+    qqq_hist,
+    regime_result,
+    benchmark_closes,
+    benchmark_tickers,
+    include_strategy_features,
+    max_stale_trading_gap_days,
+    label_horizon,
+):
+    if ticker in benchmark_tickers:
+        return None
+    if ticker_full is None or ticker_full.empty:
+        return (
+            "fail",
+            {"Ticker": ticker, "Date": feature_date, "Reason": "No price data available."},
+        )
+    hist = truncate_to_as_of(ticker_full, feature_date)
+    if hist.empty:
+        return (
+            "fail",
+            {
+                "Ticker": ticker,
+                "Date": feature_date,
+                "Reason": "No rows at or before the evaluation date.",
+            },
+        )
+    actual_feature_date = hist.index[-1]
+    staleness_days = (feature_date - actual_feature_date).days
+    if staleness_days > max_stale_trading_gap_days:
+        return (
+            "fail",
+            {
+                "Ticker": ticker,
+                "Date": feature_date,
+                "Reason": (
+                    f"Most recent available row ({actual_feature_date.date()}) "
+                    f"is {staleness_days} calendar days stale."
+                ),
+            },
+        )
+    if len(hist) < REQUIRED_HISTORY_DAYS:
+        return ("insufficient_history", None)
+    try:
+        feature_values = compute_feature_row(
+            ticker,
+            hist,
+            spy_hist,
+            qqq_hist,
+            regime_result=regime_result,
+            include_strategy_features=include_strategy_features,
+        )
+    except InsufficientHistoryError:
+        return ("insufficient_history", None)
+    except Exception as error:  # noqa: BLE001 - per-ticker isolation is intentional
+        return (
+            "fail",
+            {
+                "Ticker": ticker,
+                "Date": feature_date,
+                "Reason": f"Feature computation failed: {error}",
+            },
+        )
+    label_values = compute_labels(
+        ticker_full["Close"],
+        benchmark_closes,
+        actual_feature_date,
+        primary_horizon=label_horizon,
+    )
+    row = {
+        "Ticker": ticker,
+        "Date": feature_date,
+        "As Of Trading Date": actual_feature_date,
+    }
+    row.update(feature_values)
+    row.update(label_values)
+    status = (
+        "insufficient_future"
+        if pd.isna(label_values.get(forward_return_column(label_horizon)))
+        else "row"
+    )
+    return (status, row)
 
 
 def build_feature_dataset(
@@ -170,6 +258,16 @@ def build_feature_dataset(
             all_tickers, warmup_start, label_end, status_callback=status_callback
         )
 
+    register_price_universe(price_data)
+    cleaned_prices = {
+        ticker: (
+            frame.dropna(subset=["Close"])
+            if frame is not None and not frame.empty and "Close" in frame.columns
+            else frame
+        )
+        for ticker, frame in price_data.items()
+    }
+
     rows = []
     insufficient_history_skips = 0
     insufficient_future_label_rows = 0
@@ -177,8 +275,8 @@ def build_feature_dataset(
     total_steps = len(evaluation_dates)
 
     for step, feature_date in enumerate(evaluation_dates):
-        spy_full = price_data.get("SPY")
-        qqq_full = price_data.get("QQQ")
+        spy_full = cleaned_prices.get("SPY")
+        qqq_full = cleaned_prices.get("QQQ")
         if spy_full is None or spy_full.empty or qqq_full is None or qqq_full.empty:
             failed_ticker_dates.append(
                 {
@@ -205,94 +303,47 @@ def build_feature_dataset(
                 progress_callback(step + 1, total_steps, feature_date)
             continue
 
-        date_universe = _universe_for_date(feature_date, fixed_universe, superset)
+        date_universe = [
+            ticker
+            for ticker in _universe_for_date(feature_date, fixed_universe, superset)
+            if ticker not in benchmark_tickers
+        ]
         benchmark_closes = {
-            name: price_data[name]["Close"]
+            name: cleaned_prices[name]["Close"]
             for name in benchmark_tickers
-            if price_data.get(name) is not None
+            if cleaned_prices.get(name) is not None
         }
 
-        for ticker in date_universe:
-            if ticker in benchmark_tickers:
-                continue
-
-            ticker_full = price_data.get(ticker)
-            if ticker_full is None or ticker_full.empty:
-                failed_ticker_dates.append(
-                    {"Ticker": ticker, "Date": feature_date, "Reason": "No price data available."}
-                )
-                continue
-
-            ticker_full = ticker_full.dropna(subset=["Close"])
-            hist = truncate_to_as_of(ticker_full, feature_date)
-            if hist.empty:
-                failed_ticker_dates.append(
-                    {
-                        "Ticker": ticker,
-                        "Date": feature_date,
-                        "Reason": "No rows at or before the evaluation date.",
-                    }
-                )
-                continue
-
-            actual_feature_date = hist.index[-1]
-            staleness_days = (feature_date - actual_feature_date).days
-            if staleness_days > max_stale_trading_gap_days:
-                failed_ticker_dates.append(
-                    {
-                        "Ticker": ticker,
-                        "Date": feature_date,
-                        "Reason": (
-                            f"Most recent available row ({actual_feature_date.date()}) "
-                            f"is {staleness_days} calendar days stale."
-                        ),
-                    }
-                )
-                continue
-
-            if len(hist) < REQUIRED_HISTORY_DAYS:
-                insufficient_history_skips += 1
-                continue
-
-            try:
-                feature_values = compute_feature_row(
-                    ticker,
-                    hist,
-                    spy_hist,
-                    qqq_hist,
-                    regime_result=regime_result,
-                    include_strategy_features=include_strategy_features,
-                )
-            except InsufficientHistoryError:
-                insufficient_history_skips += 1
-                continue
-            except Exception as error:  # noqa: BLE001 - per-ticker isolation is intentional
-                failed_ticker_dates.append(
-                    {
-                        "Ticker": ticker,
-                        "Date": feature_date,
-                        "Reason": f"Feature computation failed: {error}",
-                    }
-                )
-                continue
-
-            label_values = compute_labels(
-                ticker_full["Close"],
+        computed = [
+            _build_one_ticker_row(
+                ticker,
+                feature_date,
+                cleaned_prices.get(ticker),
+                spy_hist,
+                qqq_hist,
+                regime_result,
                 benchmark_closes,
-                actual_feature_date,
-                primary_horizon=label_horizon,
+                benchmark_tickers,
+                include_strategy_features,
+                max_stale_trading_gap_days,
+                label_horizon,
             )
-            if pd.isna(label_values.get(forward_return_column(label_horizon))):
-                insufficient_future_label_rows += 1
+            for ticker in date_universe
+        ]
 
-            row = {
-                "Ticker": ticker,
-                "Date": feature_date,
-                "As Of Trading Date": actual_feature_date,
-            }
-            row.update(feature_values)
-            row.update(label_values)
-            rows.append(row)
+        for result in computed:
+            if result is None:
+                continue
+            status, payload = result
+            if status == "row":
+                rows.append(payload)
+            elif status == "insufficient_future":
+                insufficient_future_label_rows += 1
+                rows.append(payload)
+            elif status == "insufficient_history":
+                insufficient_history_skips += 1
+            elif status == "fail":
+                failed_ticker_dates.append(payload)
 
         if progress_callback:
             progress_callback(step + 1, total_steps, feature_date)

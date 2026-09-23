@@ -59,8 +59,14 @@ from data.historical_universe import get_historical_universe
 from market.regime import REQUIRED_HISTORY_DAYS as REGIME_REQUIRED_HISTORY_DAYS
 from market.regime import classify_market_regime, compute_market_features
 from market.strategy_selector import describe_availability, recommend_strategy
+from ml.feature_cache import get_feature_cache
 from ml.features import REQUIRED_HISTORY_DAYS as ML_REQUIRED_HISTORY_DAYS
-from ml.features import InsufficientHistoryError, compute_feature_row, truncate_to_as_of
+from ml.features import (
+    InsufficientHistoryError,
+    compute_feature_row,
+    register_price_universe,
+    truncate_to_as_of,
+)
 from ml.models import predicted_positive_probability
 from strategies.registry import available_strategy_names, get_strategy, invoke_analyze
 
@@ -79,6 +85,7 @@ def run_portfolio_simulation(
     top_n=None,
     method_name=None,
     universe=None,
+    progress_callback=None,
 ):
     """Simulate one method's weekly-rebalanced long-only portfolio.
 
@@ -123,11 +130,23 @@ def run_portfolio_simulation(
     trades = []
     portfolio_history = []
     previous_week = None
+    rebalance_dates = []
+    seen_week = None
+    for date in simulation_dates:
+        week = (date.isocalendar().year, date.isocalendar().week)
+        if week != seen_week:
+            rebalance_dates.append(date)
+            seen_week = week
+    total_rebalances = len(rebalance_dates)
+    rebalance_number = 0
 
     for date in simulation_dates:
         week = (date.isocalendar().year, date.isocalendar().week)
 
         if week != previous_week:
+            rebalance_number += 1
+            if progress_callback:
+                progress_callback(rebalance_number, total_rebalances, date)
             universe_snapshot = (
                 list(universe) if universe is not None else get_historical_universe(date).tickers
             )
@@ -230,6 +249,10 @@ class MLRankingStrategy:
         self.include_strategy_features = include_strategy_features
         self.required_history_days = ML_REQUIRED_HISTORY_DAYS
         self.probability_log = []
+        # Point-in-time (ticker, as-of) scores are identical across Top-N
+        # simulations of the same fitted pipeline. Cache them so Top 5/10/20
+        # do not rebuild features.
+        self._analyze_cache = {}
 
     def analyze(self, ticker, historical_data):
         historical_data = historical_data.dropna(subset=["Close"])
@@ -237,6 +260,14 @@ class MLRankingStrategy:
             return None
 
         as_of = historical_data.index[-1]
+        cache_key = (ticker, pd.Timestamp(as_of))
+        cached = self._analyze_cache.get(cache_key)
+        if cached is not None:
+            self.probability_log.append(
+                {"Date": as_of, "Ticker": ticker, "Probability": cached["Score"]}
+            )
+            return cached
+
         spy_full = self.benchmark_data.get("SPY")
         qqq_full = self.benchmark_data.get("QQQ")
         if spy_full is None or qqq_full is None:
@@ -262,8 +293,102 @@ class MLRankingStrategy:
         probability = float(predicted_positive_probability(self.pipeline, row_frame)[0])
         if not np.isfinite(probability):
             return None
-        self.probability_log.append({"Date": as_of, "Ticker": ticker, "Probability": probability})
+        result = self._result_from_probability(ticker, as_of, feature_row, probability)
+        self._analyze_cache[cache_key] = result
+        return result
 
+    def rank_key(self, result):
+        return result["Score"]
+
+    def rank_universe(
+        self,
+        downloaded_data,
+        rebalance_date,
+        universe,
+        min_stock_price,
+        historical_benchmark=None,
+    ):
+        """Score every eligible ticker with one batched `predict_proba`.
+
+        Membership, trade-price eligibility, and the strictly-before-rebalance
+        history cut are identical to `analyze()` + `rank_buy_candidates`.
+        """
+        del historical_benchmark
+        feature_rows = []
+        pending = []
+        ready = []
+        spy_full = self.benchmark_data.get("SPY")
+        qqq_full = self.benchmark_data.get("QQQ")
+        if spy_full is None or qqq_full is None:
+            return []
+        if not get_feature_cache()["tables_by_ticker"]:
+            register_price_universe(downloaded_data)
+            register_price_universe(self.benchmark_data)
+
+        for ticker in universe:
+            ticker_data = get_ticker_data(downloaded_data, ticker, copy=False)
+            if ticker_data is None:
+                continue
+            trade_price = get_trade_price(ticker_data, rebalance_date)
+            if trade_price is None or trade_price < min_stock_price:
+                continue
+            historical_data = ticker_data.loc[ticker_data.index < rebalance_date]
+            historical_data = historical_data.dropna(subset=["Close"])
+            if historical_data.empty:
+                continue
+            as_of = historical_data.index[-1]
+            cache_key = (ticker, pd.Timestamp(as_of))
+            cached = self._analyze_cache.get(cache_key)
+            if cached is not None:
+                self.probability_log.append(
+                    {"Date": as_of, "Ticker": ticker, "Probability": cached["Score"]}
+                )
+                ready.append(cached)
+                continue
+            try:
+                spy_hist = truncate_to_as_of(spy_full, as_of)
+                qqq_hist = truncate_to_as_of(qqq_full, as_of)
+                regime_result = classify_market_regime(
+                    compute_market_features(spy_hist, qqq_hist)
+                )
+                feature_row = compute_feature_row(
+                    ticker,
+                    ticker_data,
+                    spy_full,
+                    qqq_full,
+                    as_of_date=as_of,
+                    regime_result=regime_result,
+                    include_strategy_features=self.include_strategy_features,
+                )
+            except (InsufficientHistoryError, ValueError):
+                continue
+            feature_rows.append(feature_row)
+            pending.append((ticker, as_of, feature_row))
+
+        if feature_rows:
+            all_columns = self.feature_columns + self.categorical_columns
+            row_frame = pd.DataFrame(
+                [
+                    {column: feature_row.get(column, np.nan) for column in all_columns}
+                    for feature_row in feature_rows
+                ]
+            )
+            probabilities = predicted_positive_probability(self.pipeline, row_frame)
+            for (ticker, as_of, feature_row), probability in zip(pending, probabilities):
+                probability = float(probability)
+                if not np.isfinite(probability):
+                    continue
+                result = self._result_from_probability(
+                    ticker, as_of, feature_row, probability
+                )
+                self._analyze_cache[(ticker, pd.Timestamp(as_of))] = result
+                ready.append(result)
+        return ready
+
+    def _result_from_probability(self, ticker, as_of, feature_row, probability):
+        self.probability_log.append(
+            {"Date": as_of, "Ticker": ticker, "Probability": probability}
+        )
         return {
             "Ticker": ticker,
             "Score": probability,
@@ -274,9 +399,6 @@ class MLRankingStrategy:
             ),
             "Factor Details": {**feature_row, "Predicted Probability": probability},
         }
-
-    def rank_key(self, result):
-        return result["Score"]
 
 
 class RegimeSwitchingStrategy:

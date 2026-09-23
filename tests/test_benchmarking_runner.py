@@ -126,6 +126,88 @@ class RunBenchmarkTests(unittest.TestCase):
             config = json.loads(archive.read("benchmark_config.json"))
             self.assertEqual(config["number_of_tests"], 2)
 
+    def test_two_models_reuse_one_feature_dataset_per_period(self):
+        from unittest.mock import patch
+
+        from ml.dataset import build_feature_dataset as real_build
+
+        with patch(
+            "benchmarking.ml_training.build_feature_dataset", wraps=real_build
+        ) as mock_build:
+            run_benchmark(
+                duration="1 month",
+                earliest_allowed=self.earliest_allowed,
+                latest_allowed=self.latest_allowed,
+                number_of_tests=1,
+                random_seed=3,
+                requested_strategies=("Baseline",),
+                include_regime_switching=False,
+                ml_models=("Logistic Regression", "Random Forest"),
+                top_n_values=(5,),
+                universe=list(BENCHMARK_TICKERS),
+                price_data=self.price_data,
+                training_window_days=TEST_TRAINING_WINDOW_DAYS,
+            )
+        self.assertEqual(mock_build.call_count, 1)
+
+    def test_progress_callback_reports_stages(self):
+        events = []
+
+        def capture(event):
+            events.append(event)
+
+        run_benchmark(
+            duration="1 month",
+            earliest_allowed=self.earliest_allowed,
+            latest_allowed=self.latest_allowed,
+            number_of_tests=1,
+            random_seed=5,
+            requested_strategies=("Baseline",),
+            include_regime_switching=False,
+            ml_models=("Logistic Regression",),
+            top_n_values=(5,),
+            universe=list(BENCHMARK_TICKERS),
+            price_data=self.price_data,
+            training_window_days=TEST_TRAINING_WINDOW_DAYS,
+            progress_callback=capture,
+        )
+        stages = {event["stage"] for event in events}
+        self.assertIn("simulation", stages)
+        self.assertIn("feature construction", stages)
+        self.assertIn("fitting", stages)
+        self.assertIn("leakage audit", stages)
+        self.assertTrue(any(event.get("elapsed_seconds", 0) >= 0 for event in events))
+        self.assertTrue(any(event.get("method") == "Baseline" for event in events))
+        self.assertTrue(
+            any(
+                event.get("stage") == "simulation" and "rebalances" in str(event.get("detail") or "")
+                for event in events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.get("stage") == "fitting" and event.get("method") == "Logistic Regression"
+                for event in events
+            )
+        )
+
+    def test_custom_test_count_is_preserved(self):
+        result = run_benchmark(
+            duration="1 month",
+            earliest_allowed=self.earliest_allowed,
+            latest_allowed=self.latest_allowed,
+            number_of_tests=3,
+            random_seed=7,
+            requested_strategies=("Baseline",),
+            include_regime_switching=False,
+            ml_models=(),
+            universe=list(BENCHMARK_TICKERS),
+            price_data=self.price_data,
+            training_window_days=TEST_TRAINING_WINDOW_DAYS,
+        )
+        self.assertEqual(result.config["number_of_tests"], 3)
+        self.assertEqual(len(result.periods), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

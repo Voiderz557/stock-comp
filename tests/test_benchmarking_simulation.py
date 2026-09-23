@@ -215,6 +215,52 @@ class RunPortfolioSimulationTests(unittest.TestCase):
         )
         self.assertLessEqual(len(result["Holdings"]), 2)
 
+    def test_identical_top_n_simulations_reuse_cached_feature_rows(self):
+        from unittest.mock import patch
+
+        from ml.features import compute_feature_row as real_compute
+
+        earliest, _ = benchmark_period_bounds(self.price_data)
+        fold = train_ml_model_for_period(
+            "Logistic Regression",
+            earliest,
+            self.price_data,
+            universe=list(BENCHMARK_TICKERS),
+            training_window_days=TEST_TRAINING_WINDOW_DAYS,
+        )
+        strategy = MLRankingStrategy(
+            name="Logistic Regression",
+            pipeline=fold.pipeline,
+            feature_columns=fold.feature_columns,
+            categorical_columns=fold.categorical_columns,
+            benchmark_data={"SPY": self.price_data["SPY"], "QQQ": self.price_data["QQQ"]},
+        )
+        period_end = self.price_data["AAPL"].index[
+            self.price_data["AAPL"].index.get_indexer([earliest])[0] + 25
+        ]
+        with patch(
+            "benchmarking.simulation.compute_feature_row", wraps=real_compute
+        ) as mock_features:
+            run_portfolio_simulation(
+                strategy,
+                earliest,
+                period_end,
+                self.price_data,
+                top_n=2,
+                universe=list(BENCHMARK_TICKERS),
+            )
+            first_calls = mock_features.call_count
+            run_portfolio_simulation(
+                strategy,
+                earliest,
+                period_end,
+                self.price_data,
+                top_n=1,
+                universe=list(BENCHMARK_TICKERS),
+            )
+            self.assertGreater(first_calls, 0)
+            self.assertEqual(mock_features.call_count, first_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

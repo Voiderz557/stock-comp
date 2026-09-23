@@ -192,20 +192,26 @@ def download_backtest_data(
     return downloaded_data, cache_report
 
 
-def get_ticker_data(downloaded_data, ticker):
-    """Extract one ticker's rows from the batch download."""
+def get_ticker_data(downloaded_data, ticker, copy=True):
+    """Extract one ticker's rows from the batch download.
+
+    `copy=False` returns the cached frame for read-only ranking/valuation.
+    Callers that mutate the result must keep the default.
+    """
     if isinstance(downloaded_data, dict):
         ticker_data = downloaded_data.get(ticker)
         if ticker_data is None or ticker_data.empty:
             return None
-        return ticker_data.copy()
+        return ticker_data.copy() if copy else ticker_data
 
     available_tickers = downloaded_data.columns.get_level_values(0)
 
     if ticker not in available_tickers:
         return None
 
-    ticker_data = downloaded_data[ticker].dropna(how="all").copy()
+    ticker_data = downloaded_data[ticker].dropna(how="all")
+    if copy:
+        ticker_data = ticker_data.copy()
 
     if ticker_data.empty:
         return None
@@ -258,7 +264,9 @@ def rank_buy_candidates(
 
     preferred_benchmark = getattr(strategy, "benchmark_ticker", None)
     relative_benchmark = (
-        get_ticker_data(downloaded_data, preferred_benchmark) if preferred_benchmark else None
+        get_ticker_data(downloaded_data, preferred_benchmark, copy=False)
+        if preferred_benchmark
+        else None
     )
     if relative_benchmark is None:
         relative_benchmark = benchmark_data
@@ -266,10 +274,26 @@ def rank_buy_candidates(
     if relative_benchmark is not None and not relative_benchmark.empty:
         historical_benchmark = relative_benchmark.loc[
             relative_benchmark.index < rebalance_date
-        ].copy()
+        ]
+
+    rank_universe = getattr(strategy, "rank_universe", None)
+    if callable(rank_universe):
+        candidates = [
+            result
+            for result in rank_universe(
+                downloaded_data,
+                rebalance_date,
+                universe,
+                min_stock_price,
+                historical_benchmark,
+            )
+            if result is not None and result["Signal"] == "BUY"
+        ]
+        candidates.sort(key=strategy.rank_key, reverse=True)
+        return candidates
 
     for ticker in universe:
-        ticker_data = get_ticker_data(downloaded_data, ticker)
+        ticker_data = get_ticker_data(downloaded_data, ticker, copy=False)
 
         if ticker_data is None:
             continue
@@ -284,7 +308,7 @@ def rank_buy_candidates(
         # to the strategy before that trade occurs.
         historical_data = ticker_data.loc[
             ticker_data.index < rebalance_date
-        ].copy()
+        ]
 
         result = invoke_analyze(
             strategy.analyze,
@@ -317,7 +341,7 @@ def rebalance_portfolio(
     trade_prices = {}
 
     for ticker in set(holdings) | set(selected_tickers):
-        ticker_data = get_ticker_data(downloaded_data, ticker)
+        ticker_data = get_ticker_data(downloaded_data, ticker, copy=False)
 
         if ticker_data is None:
             continue
@@ -409,7 +433,7 @@ def calculate_portfolio_value(downloaded_data, date, cash, holdings):
     total_value = cash
 
     for ticker, shares in holdings.items():
-        ticker_data = get_ticker_data(downloaded_data, ticker)
+        ticker_data = get_ticker_data(downloaded_data, ticker, copy=False)
 
         if ticker_data is None:
             continue

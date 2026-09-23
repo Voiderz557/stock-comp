@@ -83,6 +83,19 @@ class PromotionGateTests(unittest.TestCase):
         self.assertNotEqual(result.decision, PROMOTE)
         self.assertIn("Leakage audit FAILED", result.reasons[0])
 
+    def test_missing_required_coverage_forces_invalid(self):
+        result = evaluate_promotion(
+            "Logistic Regression Top 10",
+            _metrics(),
+            _metrics(),
+            "Baseline",
+            [0.2] * 20,
+            coverage_is_valid=False,
+        )
+        self.assertEqual(result.decision, INVALID)
+        self.assertNotEqual(result.decision, PROMOTE)
+        self.assertTrue(any("coverage" in reason.lower() for reason in result.reasons))
+
     def test_missing_metrics_are_not_treated_as_zero(self):
         result = evaluate_promotion(
             "Logistic Regression Top 5",

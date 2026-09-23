@@ -26,6 +26,10 @@ from market.regime import (
     classify_market_regime,
     compute_market_features,
 )
+from ml.feature_cache import (
+    get_feature_cache,
+    history_fingerprint,
+)
 from strategies.mean_reversion_v1 import calculate_rsi
 from strategies.registry import available_strategy_names, get_strategy, invoke_analyze
 
@@ -114,7 +118,8 @@ def truncate_to_as_of(data, as_of_date):
     makes the no-look-ahead rule easy to audit at a glance.
     """
     as_of_date = pd.Timestamp(as_of_date)
-    return data.loc[data.index <= as_of_date]
+    position = data.index.searchsorted(as_of_date, side="right")
+    return data.iloc[:position]
 
 
 def _moving_average(closes, window):
@@ -297,7 +302,163 @@ def compute_regime_features(spy_hist, qqq_hist, regime_result=None):
     }
 
 
-def compute_strategy_features(ticker, historical_data, benchmark_data=None):
+def trailing_indicator_frame(close, volume=None):
+    """Precompute backward-looking indicator columns aligned to `close`.
+
+    Each value at date T uses only rows at or before T, so looking up the
+    row at T is equivalent to computing the same indicator on a series
+    truncated to T.
+    """
+    close = pd.Series(close).astype(float)
+    pct = close.pct_change()
+    delta = close.diff()
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    avg_gain = gains.rolling(RSI_PERIOD_DAYS, min_periods=RSI_PERIOD_DAYS).mean()
+    avg_loss = losses.rolling(RSI_PERIOD_DAYS, min_periods=RSI_PERIOD_DAYS).mean()
+    rsi = 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss.replace(0.0, np.nan))))
+    rsi = rsi.mask(avg_loss == 0.0, 100.0)
+
+    ma20 = close.rolling(MOVING_AVERAGE_20D_DAYS, min_periods=MOVING_AVERAGE_20D_DAYS).mean()
+    ma50 = close.rolling(MOVING_AVERAGE_50D_DAYS, min_periods=MOVING_AVERAGE_50D_DAYS).mean()
+    ma200 = close.rolling(MOVING_AVERAGE_200D_DAYS, min_periods=MOVING_AVERAGE_200D_DAYS).mean()
+    ma20_prior = ma20.shift(MA_SLOPE_LOOKBACK_DAYS)
+    ma50_prior = ma50.shift(MA_SLOPE_LOOKBACK_DAYS)
+    window_std = close.rolling(ZSCORE_WINDOW_DAYS, min_periods=ZSCORE_WINDOW_DAYS).std(ddof=0)
+    zscore = (close - ma20) / window_std.replace(0.0, np.nan)
+    zscore = zscore.mask(window_std == 0.0, 0.0)
+
+    frame = pd.DataFrame(
+        {
+            "Price": close,
+            "MA20": ma20,
+            "MA50": ma50,
+            "MA200": ma200,
+            "Distance From MA20": (close / ma20) - 1.0,
+            "Distance From MA50": (close / ma50) - 1.0,
+            "Distance From MA200": (close / ma200) - 1.0,
+            "MA20 Slope": (ma20 - ma20_prior) / ma20_prior.abs(),
+            "MA50 Slope": (ma50 - ma50_prior) / ma50_prior.abs(),
+            "Momentum 5D": (close / close.shift(MOMENTUM_5D_DAYS)) - 1.0,
+            "Momentum 20D": (close / close.shift(MOMENTUM_20D_DAYS)) - 1.0,
+            "Momentum 60D": (close / close.shift(MOMENTUM_60D_DAYS)) - 1.0,
+            "Momentum 120D": (close / close.shift(MOMENTUM_120D_DAYS)) - 1.0,
+            "Breakout Distance 20D": (
+                close / close.shift(1).rolling(BREAKOUT_20D_DAYS, min_periods=BREAKOUT_20D_DAYS).max()
+            )
+            - 1.0,
+            "Breakout Distance 60D": (
+                close / close.shift(1).rolling(BREAKOUT_60D_DAYS, min_periods=BREAKOUT_60D_DAYS).max()
+            )
+            - 1.0,
+            "Volatility 20D": pct.rolling(VOLATILITY_20D_DAYS, min_periods=VOLATILITY_20D_DAYS).std(ddof=1),
+            "Volatility 60D": pct.rolling(VOLATILITY_60D_DAYS, min_periods=VOLATILITY_60D_DAYS).std(ddof=1),
+            "RSI14": rsi,
+            "Price Zscore MA20": zscore,
+        }
+    )
+    if volume is not None:
+        volume = pd.Series(volume).astype(float)
+        recent = volume.rolling(VOLUME_RECENT_DAYS, min_periods=VOLUME_RECENT_DAYS).mean()
+        baseline = volume.rolling(VOLUME_BASELINE_DAYS, min_periods=VOLUME_BASELINE_DAYS).mean()
+        recent_half = volume.rolling(
+            VOLUME_TREND_HALF_WINDOW_DAYS, min_periods=VOLUME_TREND_HALF_WINDOW_DAYS
+        ).mean()
+        prior_half = recent_half.shift(VOLUME_TREND_HALF_WINDOW_DAYS)
+        frame["Volume Ratio 5D 20D"] = recent / baseline.replace(0.0, np.nan)
+        frame["Volume Trend 20D"] = (recent_half / prior_half.replace(0.0, np.nan)) - 1.0
+    return frame
+
+
+def register_price_universe(price_data):
+    """Precompute trailing-indicator tables for every full price frame."""
+    cache = get_feature_cache()
+    for ticker, frame in (price_data or {}).items():
+        if frame is None or getattr(frame, "empty", True) or "Close" not in frame.columns:
+            continue
+        clean = frame.dropna(subset=["Close"])
+        if clean.empty:
+            continue
+        with cache["lock"]:
+            if ticker in cache["tables_by_ticker"]:
+                cache["stats"]["indicator_hits"] += 1
+                continue
+        table = trailing_indicator_frame(
+            clean["Close"],
+            clean["Volume"] if "Volume" in clean.columns else None,
+        )
+        with cache["lock"]:
+            cache["tables_by_ticker"][ticker] = table
+            cache["indicator_tables"][(ticker, history_fingerprint(clean))] = table
+            cache["stats"]["indicator_registers"] += 1
+    return cache["tables_by_ticker"]
+
+
+def indicator_table_for(ticker, frame):
+    """Return a trailing-indicator table, preferring a registered full-frame table."""
+    cache = get_feature_cache()
+    with cache["lock"]:
+        registered = cache["tables_by_ticker"].get(ticker)
+        if registered is not None:
+            cache["stats"]["indicator_hits"] += 1
+            return registered
+        fingerprint = history_fingerprint(frame)
+        key = (ticker, fingerprint)
+        cached = cache["indicator_tables"].get(key)
+        if cached is not None:
+            cache["stats"]["indicator_hits"] += 1
+            return cached
+        cache["stats"]["indicator_misses"] += 1
+    volume = frame["Volume"] if frame is not None and "Volume" in frame.columns else None
+    table = trailing_indicator_frame(frame["Close"], volume)
+    with cache["lock"]:
+        cache["indicator_tables"][key] = table
+    return table
+
+
+def _lookup_indicator_row(table, as_of):
+    as_of = pd.Timestamp(as_of)
+    if as_of in table.index:
+        return table.loc[as_of]
+    eligible = table.loc[table.index <= as_of]
+    if eligible.empty:
+        return None
+    return eligible.iloc[-1]
+
+
+def _price_features_from_indicator_rows(stock_row, spy_row, qqq_row):
+    row = {
+        "Price": float(stock_row["Price"]),
+        "MA20": float(stock_row["MA20"]),
+        "MA50": float(stock_row["MA50"]),
+        "MA200": float(stock_row["MA200"]),
+        "Distance From MA20": float(stock_row["Distance From MA20"]),
+        "Distance From MA50": float(stock_row["Distance From MA50"]),
+        "Distance From MA200": float(stock_row["Distance From MA200"]),
+        "MA20 Slope": float(stock_row["MA20 Slope"]),
+        "MA50 Slope": float(stock_row["MA50 Slope"]),
+        "Momentum 5D": float(stock_row["Momentum 5D"]),
+        "Momentum 20D": float(stock_row["Momentum 20D"]),
+        "Momentum 60D": float(stock_row["Momentum 60D"]),
+        "Momentum 120D": float(stock_row["Momentum 120D"]),
+        "Relative Strength 20D SPY": float(stock_row["Momentum 20D"] - spy_row["Momentum 20D"]),
+        "Relative Strength 60D SPY": float(stock_row["Momentum 60D"] - spy_row["Momentum 60D"]),
+        "Relative Strength 20D QQQ": float(stock_row["Momentum 20D"] - qqq_row["Momentum 20D"]),
+        "Relative Strength 60D QQQ": float(stock_row["Momentum 60D"] - qqq_row["Momentum 60D"]),
+        "Breakout Distance 20D": float(stock_row["Breakout Distance 20D"]),
+        "Breakout Distance 60D": float(stock_row["Breakout Distance 60D"]),
+    }
+    if "Volume Ratio 5D 20D" in stock_row.index:
+        row["Volume Ratio 5D 20D"] = float(stock_row["Volume Ratio 5D 20D"])
+        row["Volume Trend 20D"] = float(stock_row["Volume Trend 20D"])
+    row["Volatility 20D"] = float(stock_row["Volatility 20D"])
+    row["Volatility 60D"] = float(stock_row["Volatility 60D"])
+    row["RSI14"] = float(stock_row["RSI14"])
+    row["Price Zscore MA20"] = float(stock_row["Price Zscore MA20"])
+    return row
+
+
+def compute_strategy_features(ticker, historical_data, benchmark_data=None, use_cache=True):
     """Score/signal outputs of every registered strategy, as extra features.
 
     IMPORTANT: this calls each strategy's own `analyze()` on the exact same
@@ -309,6 +470,24 @@ def compute_strategy_features(ticker, historical_data, benchmark_data=None):
     (NaN), to be handled by imputation downstream, rather than skipping the
     whole row.
     """
+    cache = get_feature_cache()
+    cache_key = None
+    if use_cache:
+        as_of = historical_data.index[-1] if not historical_data.empty else None
+        cache_key = (
+            ticker,
+            None if as_of is None else pd.Timestamp(as_of),
+            history_fingerprint(historical_data),
+            history_fingerprint(benchmark_data) if benchmark_data is not None else None,
+            tuple(available_strategy_names()),
+        )
+        with cache["lock"]:
+            cached = cache["strategy_features"].get(cache_key)
+            if cached is not None:
+                cache["stats"]["strategy_hits"] += 1
+                return dict(cached)
+            cache["stats"]["strategy_misses"] += 1
+
     strategy_features = {}
     for name in available_strategy_names():
         result = invoke_analyze(
@@ -327,7 +506,27 @@ def compute_strategy_features(ticker, historical_data, benchmark_data=None):
         strategy_features[signal_column] = SIGNAL_ENCODING.get(
             result["Signal"], np.nan
         )
+    if cache_key is not None:
+        with cache["lock"]:
+            cache["strategy_features"][cache_key] = dict(strategy_features)
     return strategy_features
+
+
+def _compute_price_features_original(historical_data, spy_hist, qqq_hist):
+    closes = historical_data["Close"]
+    volumes = historical_data["Volume"] if "Volume" in historical_data.columns else None
+    spy_closes = spy_hist["Close"].dropna()
+    qqq_closes = qqq_hist["Close"].dropna()
+    row = {}
+    row.update(compute_price_trend_features(closes))
+    row.update(compute_momentum_features(closes))
+    row.update(compute_relative_strength_features(closes, spy_closes, qqq_closes))
+    row.update(compute_breakout_features(closes))
+    if volumes is not None:
+        row.update(compute_volume_features(volumes))
+    row.update(compute_volatility_features(closes))
+    row.update(compute_mean_reversion_features(closes))
+    return row
 
 
 def compute_feature_row(
@@ -338,6 +537,7 @@ def compute_feature_row(
     as_of_date=None,
     regime_result=None,
     include_strategy_features=True,
+    use_cache=True,
 ):
     """Build one point-in-time feature row for `ticker` as of its last row.
 
@@ -345,6 +545,10 @@ def compute_feature_row(
     (via `truncate_to_as_of`) to rows at or before the evaluation date; this
     function re-truncates defensively if `as_of_date` is given, but does not
     otherwise inspect wall-clock time or any external state.
+
+    When `use_cache` is true, trailing indicators and completed rows are
+    reused for the same ticker/as-of/history fingerprint. Fitted models are
+    never stored here.
 
     Raises `InsufficientHistoryError` if there are fewer than
     `REQUIRED_HISTORY_DAYS` valid rows for the ticker.
@@ -361,23 +565,55 @@ def compute_feature_row(
             f"got {len(historical_data)}."
         )
 
-    closes = historical_data["Close"]
-    volumes = historical_data["Volume"] if "Volume" in historical_data.columns else None
-    spy_closes = spy_hist["Close"].dropna()
-    qqq_closes = qqq_hist["Close"].dropna()
+    cache = get_feature_cache()
+    as_of = historical_data.index[-1]
+    row_key = (
+        ticker,
+        pd.Timestamp(as_of),
+        include_strategy_features,
+        history_fingerprint(historical_data),
+        history_fingerprint(spy_hist),
+        history_fingerprint(qqq_hist),
+    )
+    if use_cache:
+        with cache["lock"]:
+            cached = cache["feature_rows"].get(row_key)
+            if cached is not None:
+                cache["stats"]["feature_hits"] += 1
+                return dict(cached)
+            cache["stats"]["feature_misses"] += 1
 
     row = {}
-    row.update(compute_price_trend_features(closes))
-    row.update(compute_momentum_features(closes))
-    row.update(compute_relative_strength_features(closes, spy_closes, qqq_closes))
-    row.update(compute_breakout_features(closes))
-    if volumes is not None:
-        row.update(compute_volume_features(volumes))
-    row.update(compute_volatility_features(closes))
-    row.update(compute_mean_reversion_features(closes))
+    used_tables = False
+    if use_cache:
+        stock_table = indicator_table_for(ticker, historical_data)
+        spy_table = indicator_table_for("SPY", spy_hist)
+        qqq_table = indicator_table_for("QQQ", qqq_hist)
+        stock_row = _lookup_indicator_row(stock_table, as_of)
+        spy_row = _lookup_indicator_row(spy_table, as_of)
+        qqq_row = _lookup_indicator_row(qqq_table, as_of)
+        if stock_row is not None and spy_row is not None and qqq_row is not None:
+            try:
+                row.update(_price_features_from_indicator_rows(stock_row, spy_row, qqq_row))
+                used_tables = True
+            except (TypeError, ValueError, KeyError):
+                row = {}
+                used_tables = False
+    if not used_tables:
+        row.update(_compute_price_features_original(historical_data, spy_hist, qqq_hist))
     row.update(compute_regime_features(spy_hist, qqq_hist, regime_result=regime_result))
     if include_strategy_features:
-        row.update(compute_strategy_features(ticker, historical_data, benchmark_data=qqq_hist))
+        row.update(
+            compute_strategy_features(
+                ticker,
+                historical_data,
+                benchmark_data=qqq_hist,
+                use_cache=use_cache,
+            )
+        )
+    if use_cache:
+        with cache["lock"]:
+            cache["feature_rows"][row_key] = dict(row)
     return row
 
 

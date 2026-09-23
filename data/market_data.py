@@ -24,6 +24,8 @@ from data.ticker_history import (
     get_provider_symbol,
     get_ticker_identity,
     lifecycle_status_for_period,
+    listed_price_range,
+    provider_fetch_segments,
 )
 
 
@@ -96,7 +98,8 @@ def _missing_row_ranges(data, start, end_exclusive, tolerance_days=None):
 
 def _required_integrity_ranges(ticker, start, end_exclusive, required_ranges):
     if required_ranges is None:
-        return [(start, end_exclusive)]
+        listed = listed_price_range(ticker, start, end_exclusive)
+        return [] if listed is None else [listed]
     ranges = []
     for required_start, required_end in required_ranges.get(ticker, []):
         overlap_start = max(start, pd.Timestamp(required_start).normalize())
@@ -104,8 +107,9 @@ def _required_integrity_ranges(ticker, start, end_exclusive, required_ranges):
             end_exclusive,
             pd.Timestamp(required_end).normalize() + pd.Timedelta(days=1),
         )
-        if overlap_start < overlap_end:
-            ranges.append((overlap_start, overlap_end))
+        listed = listed_price_range(ticker, overlap_start, overlap_end)
+        if listed is not None:
+            ranges.append(listed)
     return _merge_ranges(ranges)
 
 
@@ -218,9 +222,7 @@ def _normalize_download(data, provider_symbol=None):
     return data[columns].sort_index()
 
 
-def _download_range(ticker, start, end_exclusive):
-    """Primary provider: yfinance, with known historical symbol routing."""
-    provider_symbol = get_provider_symbol(ticker)
+def _download_provider_symbol(provider_symbol, start, end_exclusive):
     downloaded = yf.download(
         tickers=provider_symbol,
         start=start.strftime("%Y-%m-%d"),
@@ -231,6 +233,20 @@ def _download_range(ticker, start, end_exclusive):
         timeout=YFINANCE_REQUEST_TIMEOUT_SECONDS,
     )
     return _normalize_download(downloaded, provider_symbol)
+
+
+def _download_range(ticker, start, end_exclusive):
+    """Primary provider: yfinance, with known historical symbol routing."""
+    frames = []
+    for provider_symbol, seg_start, seg_end in provider_fetch_segments(
+        ticker, start, end_exclusive
+    ):
+        frames.append(_download_provider_symbol(provider_symbol, seg_start, seg_end))
+    nonempty = [frame for frame in frames if frame is not None and not frame.empty]
+    if not nonempty:
+        return _empty_price_frame()
+    combined = pd.concat(nonempty).sort_index()
+    return combined[~combined.index.duplicated(keep="last")]
 
 
 def _download_with_hard_timeout(ticker, start, end_exclusive):
@@ -281,10 +297,13 @@ def _range_overlaps(left, right):
 
 
 def _is_required_range(ticker, requested_range, required_ranges):
+    listed_request = listed_price_range(ticker, requested_range[0], requested_range[1])
+    if listed_request is None:
+        return False
     if required_ranges is None:
         return True
     return any(
-        _range_overlaps(requested_range, valid_range)
+        _range_overlaps(listed_request, valid_range)
         for valid_range in required_ranges.get(ticker, [])
     )
 
@@ -456,9 +475,27 @@ def _load_ticker(
     for missing_start, missing_end in missing_ranges:
         if missing_start >= missing_end:
             continue
-        known_segments = _known_failure_segments(
+        listed = listed_price_range(ticker, missing_start, missing_end)
+        if listed is None:
+            continue
+        missing_start, missing_end = listed
+        identity = get_ticker_identity(ticker)
+        known_segments = []
+        for failed_start, failed_end, record in _known_failure_segments(
             failure_cache, ticker, missing_start, missing_end
-        )
+        ):
+            record_start = pd.Timestamp(record["Requested Start"])
+            # A Yahoo miss recorded on a window that begins before listing is
+            # not evidence that the later listed sub-range is unavailable.
+            if (
+                identity.public_start is not None
+                and record_start < pd.Timestamp(identity.public_start).normalize()
+            ):
+                continue
+            overlap = listed_price_range(ticker, failed_start, failed_end)
+            if overlap is None:
+                continue
+            known_segments.append((overlap[0], overlap[1], record))
         for failed_start, failed_end, record in known_segments:
             fallback, source, fallback_errors = _try_secondary_providers(
                 providers, ticker, failed_start, failed_end
@@ -484,6 +521,10 @@ def _load_ticker(
             missing_start, missing_end, known_segments
         )
         for fetch_start, fetch_end in uncovered_ranges:
+            listed_fetch = listed_price_range(ticker, fetch_start, fetch_end)
+            if listed_fetch is None:
+                continue
+            fetch_start, fetch_end = listed_fetch
             primary_reason = cache_error
             attempted_yfinance = True
             try:
@@ -513,17 +554,18 @@ def _load_ticker(
                 lifecycle = lifecycle_status_for_period(
                     ticker, fetch_start, fetch_end - pd.Timedelta(days=1)
                 )
-                if lifecycle != NOT_PUBLIC_YET and _is_required_range(
-                    ticker, (fetch_start, fetch_end), required_ranges
-                ):
+                if lifecycle != NOT_PUBLIC_YET:
                     failure = _failure(
                         ticker,
                         fetch_start,
                         fetch_end,
                         primary_reason or "No provider returned historical rows",
                     )
-                    failures.append(failure)
                     _store_failure(failure_cache, failure)
+                    if _is_required_range(
+                        ticker, (fetch_start, fetch_end), required_ranges
+                    ):
+                        failures.append(failure)
             else:
                 frames.append(fetched)
                 if _missing_row_ranges(fetched, fetch_start, fetch_end):
@@ -588,6 +630,13 @@ def _validate_required_coverage(data, required_ranges, existing_failures):
             continue
         frame = data.get(ticker, _empty_price_frame())
         for start, end in ranges:
+            listed = listed_price_range(
+                ticker, start, end + pd.Timedelta(days=1)
+            )
+            if listed is None:
+                continue
+            start, end_exclusive = listed
+            end = end_exclusive - pd.Timedelta(days=1)
             if not frame.empty:
                 available = frame.loc[(frame.index >= start) & (frame.index <= end)]
                 if not available.empty:
@@ -629,8 +678,10 @@ def load_market_data(
     downloaded_tickers = []
     failures = []
     secondary_sources = []
+    unique_tickers = list(dict.fromkeys(tickers))
+    ticker_count = len(unique_tickers)
 
-    for ticker in dict.fromkeys(tickers):
+    for index, ticker in enumerate(unique_tickers, start=1):
         coverage = manifest.get(ticker)
         fully_cached = _cache_fully_covers(
             ticker,
@@ -641,7 +692,10 @@ def load_market_data(
             required_ranges,
         )
         if status_callback:
-            status_callback("USING CACHE" if fully_cached else "DOWNLOADING", ticker)
+            status_callback(
+                "USING CACHE" if fully_cached else "DOWNLOADING",
+                f"{ticker} ({index}/{ticker_count})",
+            )
         frame, downloaded, ticker_failures, ticker_secondary = _load_ticker(
             ticker,
             start,
