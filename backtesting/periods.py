@@ -21,6 +21,8 @@ def generate_random_periods(duration, earliest, latest, number_of_tests, seed):
         raise ValueError("Unknown test duration.")
     earliest = pd.Timestamp(earliest).normalize()
     latest = pd.Timestamp(latest).normalize()
+    if earliest >= latest:
+        raise ValueError("The earliest allowed date must be before the latest allowed date.")
     offset = DURATION_OPTIONS[duration]
     latest_start = latest - offset
     if earliest > latest_start:

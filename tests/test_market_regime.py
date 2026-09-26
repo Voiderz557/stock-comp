@@ -160,19 +160,20 @@ class StrategyMappingTests(unittest.TestCase):
         recommendation = recommend_strategy(WEAK_UPTREND)
         self.assertEqual(
             recommendation.preferred_strategies,
-            ("Momentum V2", "Relative Strength Momentum V1"),
+            ("Momentum V2", "Relative Strength Momentum V1", "Mean Reversion V1"),
         )
 
-    def test_sideways_mapping_uses_baseline_and_flags_future_work(self):
+    def test_sideways_mapping_prefers_mean_reversion_v1(self):
         recommendation = recommend_strategy(SIDEWAYS)
-        self.assertEqual(recommendation.preferred_strategies, ("Baseline",))
-        self.assertTrue(
-            any("Mean Reversion" in note for note in recommendation.notes)
+        self.assertEqual(
+            recommendation.preferred_strategies, ("Mean Reversion V1", "Baseline")
         )
+        self.assertEqual(recommendation.preferred_strategies[0], "Mean Reversion V1")
 
     def test_downtrend_mapping_prefers_no_long_strategy(self):
         recommendation = recommend_strategy(DOWNTREND)
         self.assertEqual(recommendation.preferred_strategies, ())
+        self.assertIn("Mean Reversion V1", recommendation.strategies_to_avoid)
         self.assertTrue(any("bearish" in note.lower() for note in recommendation.notes))
 
     def test_high_volatility_mapping_avoids_aggressive_momentum(self):
@@ -186,15 +187,17 @@ class StrategyMappingTests(unittest.TestCase):
         recommendation = recommend_strategy(result)
         self.assertEqual(recommendation.regime, result.regime)
 
-    def test_describe_availability_flags_unregistered_strategies(self):
+    def test_describe_availability_flags_registered_strategies(self):
         pairs = describe_availability(["Baseline", "Aggressive Momentum V1"])
         self.assertIn(("Baseline", True), pairs)
-        self.assertIn(("Aggressive Momentum V1", False), pairs)
+        self.assertIn(("Aggressive Momentum V1", True), pairs)
 
 
 class ExistingStrategiesUnchangedTests(unittest.TestCase):
-    def test_registry_still_only_contains_baseline_and_momentum_v2(self):
-        self.assertEqual(available_strategy_names(), ["Baseline", "Momentum V2"])
+    def test_registry_still_contains_baseline_and_momentum_v2(self):
+        names = available_strategy_names()
+        self.assertIn("Baseline", names)
+        self.assertIn("Momentum V2", names)
 
 
 if __name__ == "__main__":

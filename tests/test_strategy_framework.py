@@ -9,7 +9,12 @@ from backtesting.export import build_complete_backtest_package
 from config import LONG_MOMENTUM_DAYS, MOVING_AVERAGE_DAYS
 from strategies.baseline import REQUIRED_HISTORY_DAYS
 from strategies.momentum_v2 import REQUIRED_HISTORY_DAYS as MOMENTUM_V2_REQUIRED_HISTORY_DAYS
-from strategies.registry import available_strategy_names, get_strategy
+from strategies.registry import (
+    available_strategy_names,
+    extra_strategy_benchmark_tickers,
+    get_strategy,
+    invoke_analyze,
+)
 
 
 def _linear_closes(length, slope=0.5, start=100.0):
@@ -24,8 +29,14 @@ def _price_frame(closes, start="2025-01-01"):
 
 
 class BaselineRegressionTests(unittest.TestCase):
-    def test_registry_contains_baseline_and_momentum_v2(self):
-        self.assertEqual(available_strategy_names(), ["Baseline", "Momentum V2"])
+    def test_registry_contains_core_and_registered_v1_strategies(self):
+        names = available_strategy_names()
+        self.assertIn("Baseline", names)
+        self.assertIn("Momentum V2", names)
+        self.assertIn("Aggressive Momentum V1", names)
+        self.assertIn("Relative Strength Momentum V1", names)
+        self.assertIn("Breakout Volume V1", names)
+        self.assertIn("Mean Reversion V1", names)
 
     def test_baseline_required_history_days_is_correct(self):
         expected = max(LONG_MOMENTUM_DAYS + 1, MOVING_AVERAGE_DAYS)
@@ -154,6 +165,42 @@ class MomentumV2Tests(unittest.TestCase):
             get_strategy("Momentum V2").rank_key(stronger),
             get_strategy("Momentum V2").rank_key(weaker),
         )
+
+
+class StrategyRegistrationTests(unittest.TestCase):
+    REGISTERED_V1 = (
+        "Aggressive Momentum V1",
+        "Relative Strength Momentum V1",
+        "Breakout Volume V1",
+    )
+
+    def test_get_strategy_resolves_each_registered_v1_strategy(self):
+        for name in self.REGISTERED_V1:
+            definition = get_strategy(name)
+            self.assertEqual(definition.name, name)
+            self.assertTrue(callable(definition.analyze))
+            self.assertTrue(callable(definition.rank_key))
+            self.assertGreater(definition.required_history_days, 0)
+            self.assertEqual(definition.required_history_days, get_strategy(name).required_history_days)
+
+    def test_relative_strength_preserves_qqq_benchmark_requirement(self):
+        definition = get_strategy("Relative Strength Momentum V1")
+        self.assertEqual(definition.benchmark_ticker, "QQQ")
+        self.assertIn("QQQ", extra_strategy_benchmark_tickers())
+
+    def test_invoke_analyze_does_not_pass_benchmark_to_baseline(self):
+        closes = _linear_closes(30, slope=0.5)
+        data = _price_frame(closes)
+        direct = get_strategy("Baseline").analyze("TEST", data)
+        via_helper = invoke_analyze(
+            get_strategy("Baseline").analyze, "TEST", data, benchmark_data=data
+        )
+        self.assertEqual(direct["Signal"], via_helper["Signal"])
+        self.assertEqual(direct["Score"], via_helper["Score"])
+
+    def test_unknown_strategy_still_raises(self):
+        with self.assertRaises(ValueError):
+            get_strategy("Not A Real Strategy")
 
 
 class ExportTests(unittest.TestCase):

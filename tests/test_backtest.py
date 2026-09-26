@@ -16,7 +16,7 @@ from backtesting.engine import (
 )
 from backtesting.periods import generate_random_periods
 from config import LONG_MOMENTUM_DAYS, MOVING_AVERAGE_DAYS
-from data.historical_universe import get_historical_universe
+from data.historical_universe import get_backtest_tickers, get_historical_universe
 from data.market_data import LocalParquetProvider, load_market_data
 from data.ticker_history import (
     DELISTED_LATER,
@@ -25,6 +25,7 @@ from data.ticker_history import (
     SYMBOL_CHANGE,
     get_provider_symbol,
     lifecycle_status_for_period,
+    listed_price_range,
 )
 from strategies.registry import get_strategy
 
@@ -179,6 +180,34 @@ class CacheTests(unittest.TestCase):
             self.assertTrue((Path(cache_dir) / "data_failures.json").exists())
         self.assertTrue(second_report["Data Source Failures"][0]["Cached Failure"])
 
+    def test_failed_range_is_cached_even_when_not_required(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
+            with patch(
+                "data.market_data._download_range", return_value=pd.DataFrame()
+            ) as download:
+                first_data, first_report = load_market_data(
+                    ["SPLK"],
+                    "2023-05-16",
+                    "2023-12-18",
+                    cache_dir=cache_dir,
+                    required_ranges={},
+                    secondary_providers=[],
+                )
+                second_data, second_report = load_market_data(
+                    ["SPLK"],
+                    "2023-05-16",
+                    "2023-12-18",
+                    cache_dir=cache_dir,
+                    required_ranges={},
+                    secondary_providers=[],
+                )
+            self.assertEqual(download.call_count, 1)
+            self.assertTrue(first_data["SPLK"].empty)
+            self.assertEqual(first_report["Data Source Failures"], [])
+            self.assertEqual(first_report["Unavailable Valid Constituents"], [])
+            self.assertEqual(second_report["Data Source Failures"], [])
+            self.assertTrue((Path(cache_dir) / "data_failures.json").exists())
+
     def test_failure_cache_is_range_scoped(self):
         required = {
             "SPLK": [(pd.Timestamp("2023-01-01"), pd.Timestamp("2023-01-15"))]
@@ -324,11 +353,172 @@ class TickerIdentityTests(unittest.TestCase):
             SYMBOL_CHANGE,
         )
 
+    def test_fisv_requests_are_split_across_the_symbol_change(self):
+        from data.ticker_history import provider_fetch_segments
+
+        segments = provider_fetch_segments(
+            "FISV", pd.Timestamp("2022-01-01"), pd.Timestamp("2024-01-01")
+        )
+        self.assertEqual(
+            segments,
+            [
+                ("FISV", pd.Timestamp("2022-01-01"), pd.Timestamp("2023-06-07")),
+                ("FI", pd.Timestamp("2023-06-07"), pd.Timestamp("2024-01-01")),
+            ],
+        )
+        self.assertEqual(
+            provider_fetch_segments(
+                "FISV", pd.Timestamp("2022-01-01"), pd.Timestamp("2023-01-01")
+            ),
+            [("FISV", pd.Timestamp("2022-01-01"), pd.Timestamp("2023-01-01"))],
+        )
+        self.assertIsNone(
+            listed_price_range("FI", "2020-01-01", "2023-01-01")
+        )
+
+    def test_wba_post_privatization_range_is_not_requested(self):
+        self.assertIsNone(
+            listed_price_range("WBA", "2025-09-01", "2025-12-31")
+        )
+        clipped = listed_price_range("WBA", "2024-01-01", "2025-12-31")
+        self.assertEqual(clipped[0], pd.Timestamp("2024-01-01"))
+        self.assertEqual(clipped[1], pd.Timestamp("2025-08-28"))
+
     def test_not_public_yet_is_distinct_from_provider_failure(self):
         self.assertEqual(
             lifecycle_status_for_period("CRWV", "2024-01-01", "2024-12-31"),
             NOT_PUBLIC_YET,
         )
+
+    def test_listed_price_range_clips_pre_listing_and_post_delisting(self):
+        self.assertIsNone(
+            listed_price_range("ARM", "2020-01-01", "2023-01-01")
+        )
+        clipped = listed_price_range("ARM", "2020-01-01", "2024-01-01")
+        self.assertEqual(clipped[0], pd.Timestamp("2023-09-14"))
+        self.assertEqual(clipped[1], pd.Timestamp("2024-01-01"))
+        self.assertIsNone(
+            listed_price_range("SPLK", "2024-04-01", "2024-12-31")
+        )
+        splk = listed_price_range("SPLK", "2023-01-01", "2025-01-01")
+        self.assertEqual(splk[1], pd.Timestamp("2024-03-19"))
+        self.assertIsNone(listed_price_range("CEG", "2020-01-01", "2022-01-19"))
+        ceg = listed_price_range("CEG", "2020-01-01", "2023-01-01")
+        self.assertEqual(ceg[0], pd.Timestamp("2022-01-19"))
+        self.assertIsNone(listed_price_range("DASH", "2019-01-01", "2020-12-09"))
+        self.assertEqual(
+            listed_price_range("GEHC", "2020-01-01", "2024-01-01")[0],
+            pd.Timestamp("2023-01-04"),
+        )
+        self.assertEqual(
+            listed_price_range("GFS", "2020-01-01", "2022-01-01")[0],
+            pd.Timestamp("2021-10-28"),
+        )
+
+
+class ListingBoundaryDownloadTests(unittest.TestCase):
+    def test_pre_listing_range_does_not_call_yahoo_or_record_failure(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
+            with patch(
+                "data.market_data._download_range", return_value=pd.DataFrame()
+            ) as download:
+                data, report = load_market_data(
+                    ["ARM"],
+                    "2020-01-01",
+                    "2023-01-01",
+                    cache_dir=cache_dir,
+                    required_ranges={
+                        "ARM": [
+                            (pd.Timestamp("2020-06-01"), pd.Timestamp("2020-12-01"))
+                        ]
+                    },
+                    secondary_providers=[],
+                )
+        download.assert_not_called()
+        self.assertTrue(data["ARM"].empty)
+        self.assertEqual(report["Data Source Failures"], [])
+        self.assertEqual(report["Unavailable Valid Constituents"], [])
+
+    def test_spanning_request_clips_yahoo_to_public_start(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
+            with patch(
+                "data.market_data._download_range", return_value=pd.DataFrame()
+            ) as download:
+                load_market_data(
+                    ["ARM"],
+                    "2020-01-01",
+                    "2023-12-31",
+                    cache_dir=cache_dir,
+                    required_ranges={
+                        "ARM": [
+                            (pd.Timestamp("2023-09-14"), pd.Timestamp("2023-12-31"))
+                        ]
+                    },
+                    secondary_providers=[],
+                )
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(download.call_args.args[1], pd.Timestamp("2023-09-14"))
+        self.assertEqual(download.call_args.args[2], pd.Timestamp("2024-01-01"))
+
+    def test_arm_yahoo_miss_before_listing_is_not_cached_as_listed_failure(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
+            with patch(
+                "data.market_data._download_range", return_value=pd.DataFrame()
+            ) as download:
+                load_market_data(
+                    ["ARM"],
+                    "2020-01-01",
+                    "2023-01-01",
+                    cache_dir=cache_dir,
+                    required_ranges={},
+                    secondary_providers=[],
+                )
+                load_market_data(
+                    ["ARM"],
+                    "2023-09-14",
+                    "2023-12-31",
+                    cache_dir=cache_dir,
+                    required_ranges={
+                        "ARM": [
+                            (pd.Timestamp("2023-09-14"), pd.Timestamp("2023-12-31"))
+                        ]
+                    },
+                    secondary_providers=[],
+                )
+        self.assertEqual(download.call_count, 1)
+        self.assertEqual(download.call_args.args[1], pd.Timestamp("2023-09-14"))
+
+    def test_fisv_download_splits_provider_symbols_across_the_rename(self):
+        calls = []
+
+        def fake_provider(symbol, start, end_exclusive):
+            calls.append((symbol, start, end_exclusive))
+            return cache_frame(start, end_exclusive - pd.Timedelta(days=1))
+
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
+            with patch(
+                "data.market_data._download_provider_symbol", side_effect=fake_provider
+            ):
+                load_market_data(
+                    ["FISV"],
+                    "2022-01-01",
+                    "2024-01-01",
+                    cache_dir=cache_dir,
+                    required_ranges={},
+                    secondary_providers=[],
+                )
+        self.assertEqual(
+            calls,
+            [
+                ("FISV", pd.Timestamp("2022-01-01"), pd.Timestamp("2023-06-07")),
+                ("FI", pd.Timestamp("2023-06-07"), pd.Timestamp("2024-01-02")),
+            ],
+        )
+
+    def test_historical_constituents_remain_in_the_universe(self):
+        tickers = get_backtest_tickers("2022-01-01", "2024-06-30")
+        for ticker in ("SPLK", "ATVI", "SGEN", "WBA", "ARM"):
+            self.assertIn(ticker, tickers)
 
 
 class BenchmarkIsolationTests(unittest.TestCase):
@@ -520,7 +710,8 @@ class StrategyHistoryTests(unittest.TestCase):
         def fake_load(tickers, start_date, end_date, **kwargs):
             if not tickers:
                 return {}, self._load_report()
-            warmup_starts.append(pd.Timestamp(start_date))
+            if list(tickers) == ["SPY"]:
+                warmup_starts.append(pd.Timestamp(start_date))
             frame = cache_frame(start_date, end_date - pd.Timedelta(days=1))
             return {tickers[0]: frame}, self._load_report()
 

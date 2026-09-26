@@ -108,6 +108,38 @@ SNAPSHOT_DATES = tuple(
     snapshot.effective_date for snapshot in HISTORICAL_NASDAQ_100_SNAPSHOTS
 )
 
+# Single source of truth for "the earliest date historical point-in-time
+# Nasdaq-100 membership is supported for". Nothing else in the codebase
+# should hardcode this date as a separate literal - import this constant
+# instead. Any `evaluation`/`observation`/`universe_membership` date used
+# with `get_historical_universe`/`get_backtest_tickers` must be `>=` this;
+# price-history *warmup* dates are a different concept and may legitimately
+# precede it (see `data.market_data.load_market_data`, which does not
+# consult membership at all).
+HISTORICAL_UNIVERSE_START_DATE = SNAPSHOT_DATES[0]
+# Canonical alias requested by the ML date-boundary contract. Import this
+# (or `HISTORICAL_UNIVERSE_START_DATE`) instead of hardcoding 2021-12-20.
+HISTORICAL_UNIVERSE_START = HISTORICAL_UNIVERSE_START_DATE
+
+
+def require_supported_universe_membership_date(universe_membership_date):
+    """Reject membership lookups before `HISTORICAL_UNIVERSE_START`.
+
+    Price-history warmup dates must NEVER be passed here. This helper is
+    only for evaluation / observation / universe-membership dates.
+    """
+    date = pd.Timestamp(universe_membership_date).normalize()
+    if date < HISTORICAL_UNIVERSE_START:
+        raise ValueError(
+            f"Historical Nasdaq-100 membership is unavailable before "
+            f"{HISTORICAL_UNIVERSE_START.date()}. "
+            f"Requested universe membership date: {date.date()}. "
+            "Use a later evaluation/observation date, or pass an explicit "
+            "universe list. Price warmup may precede this boundary; "
+            "membership lookups may not."
+        )
+    return date
+
 UNIVERSE_SOURCE = (
     "Dated snapshots reconstructed from the Wikipedia Nasdaq-100 component "
     "change table by thuningxu/sp500nq100 and checked against recent official "
@@ -116,14 +148,14 @@ UNIVERSE_SOURCE = (
 
 
 def get_historical_universe(date):
-    """Return the newest snapshot effective on or before ``date``."""
-    date = pd.Timestamp(date).normalize()
+    """Return the newest snapshot effective on or before ``date``.
+
+    ``date`` is a universe-membership / evaluation date, not a price-warmup
+    date. Calls before `HISTORICAL_UNIVERSE_START` raise; they are never
+    silently clamped or replaced with current membership.
+    """
+    date = require_supported_universe_membership_date(date)
     position = bisect_right(SNAPSHOT_DATES, date) - 1
-    if position < 0:
-        raise ValueError(
-            f"Historical Nasdaq-100 membership is unavailable before "
-            f"{SNAPSHOT_DATES[0].date()}."
-        )
     return HISTORICAL_NASDAQ_100_SNAPSHOTS[position]
 
 

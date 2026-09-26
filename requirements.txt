@@ -3,3 +3,4 @@ yfinance
 streamlit
 pyarrow
 matplotlib
+scikit-learn
