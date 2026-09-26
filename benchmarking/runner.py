@@ -42,7 +42,12 @@ from benchmarking.ml_training import (
     prepare_training_fold,
 )
 from benchmarking.promotion import build_promotion_table, evaluate_promotion
-from benchmarking.simulation import MLRankingStrategy, RegimeSwitchingStrategy, run_portfolio_simulation
+from benchmarking.simulation import (
+    MLRankingStrategy,
+    RegimeSwitchingStrategy,
+    run_portfolio_simulation,
+    unsupported_terminal_holdings,
+)
 from benchmarking.stability import (
     build_fold_metrics_table,
     compute_feature_stability,
@@ -424,7 +429,7 @@ def run_benchmark(
                 detail=f"{date.date()} ({completed}/{total} rebalances)",
             )
 
-        return run_portfolio_simulation(
+        result = run_portfolio_simulation(
             strategy_obj,
             period_start,
             period_end,
@@ -440,6 +445,15 @@ def run_benchmark(
             universe=universe,
             progress_callback=_simulation_progress,
         )
+        terminal_failures = unsupported_terminal_holdings(result)
+        if terminal_failures:
+            first = terminal_failures[0]
+            raise RuntimeError(
+                "Unsupported terminal corporate action: "
+                f"{first['Ticker']} remained held after {first['Last Public Date']}; "
+                "verified merger/delisting proceeds are not modeled"
+            )
+        return result
 
     def _feature_progress(completed, total, date):
         progress.emit(

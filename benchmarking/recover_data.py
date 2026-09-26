@@ -19,6 +19,7 @@ import pandas as pd
 from benchmarking.coverage import audit_price_coverage
 from data.historical_universe import get_membership_ranges
 from data.market_data import _download_with_hard_timeout, _known_failure_segments
+from data.ticker_history import get_ticker_identity
 
 
 def digest(path):
@@ -161,7 +162,15 @@ def main():
         try:
             downloaded = _download_with_hard_timeout(ticker, first, end)
             downloaded.to_parquet(raw / f"{ticker}.parquet")
-            entry.update(validate_refresh(old, downloaded, expected))
+            old_for_validation = old
+            public_end = get_ticker_identity(ticker).public_end
+            if old is not None and not old.empty and public_end is not None:
+                public_end = pd.Timestamp(public_end).normalize()
+                old_for_validation = old.loc[old.index <= public_end]
+                discarded = int((old.index > public_end).sum())
+                if discarded:
+                    entry["existing_rows_after_public_end_excluded"] = discarded
+            entry.update(validate_refresh(old_for_validation, downloaded, expected))
             downloaded.to_parquet(candidate / f"{ticker}.parquet")
             prices[ticker] = downloaded
             entry["status"] = "RECOVERED_CANDIDATE_ONLY"

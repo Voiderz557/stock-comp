@@ -11,6 +11,7 @@ from benchmarking.promotion import _is_finite
 from benchmarking.promotion import evaluate_promotion, RESEARCH_MORE
 from tests.test_benchmarking_promotion import _metrics
 from benchmarking.runner import run_benchmark
+from benchmarking.simulation import unsupported_terminal_holdings
 from tests.test_benchmarking_metrics import _period_row
 
 
@@ -105,6 +106,23 @@ class BenchmarkValidationSafetyTests(unittest.TestCase):
         history = [{"Date": date, "Portfolio Value": value} for date, value in
                    zip(pd.bdate_range("2023-01-02", periods=3), [100000, np.nan, 110000])]
         self.assertTrue(pd.isna(compute_daily_portfolio_risk(history)["Daily Portfolio Volatility"]))
+
+    def test_holding_past_delisting_fails_closed(self):
+        result = {"Portfolio History": [
+            {"Date": pd.Timestamp("2023-10-13"), "Holdings": {"ATVI": 10}},
+            {"Date": pd.Timestamp("2023-10-16"), "Holdings": {"ATVI": 10}},
+        ]}
+        failures = unsupported_terminal_holdings(result)
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["Ticker"], "ATVI")
+        self.assertIn("terminal proceeds", failures[0]["Reason"])
+
+    def test_position_closed_by_last_public_date_is_supported(self):
+        result = {"Portfolio History": [
+            {"Date": pd.Timestamp("2023-10-13"), "Holdings": {"ATVI": 10}},
+            {"Date": pd.Timestamp("2023-10-16"), "Holdings": {}},
+        ]}
+        self.assertEqual(unsupported_terminal_holdings(result), [])
 
 
 if __name__ == "__main__":

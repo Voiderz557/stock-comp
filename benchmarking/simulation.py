@@ -47,6 +47,7 @@ from backtesting.engine import (
     rank_buy_candidates,
     rebalance_portfolio,
 )
+from data.ticker_history import get_ticker_identity
 from config import (
     BACKTEST_BENCHMARK,
     BACKTEST_FEE_RATE,
@@ -482,3 +483,28 @@ class RegimeSwitchingStrategy:
 
     def rank_key(self, result):
         return get_strategy(self._last_chosen_name).rank_key(result)
+
+
+# A last-known close is not automatically equivalent to cash/stock merger
+# consideration.  Detect this after simulation so research fails closed without
+# changing the shared portfolio accounting engine.
+def unsupported_terminal_holdings(result):
+    failures = []
+    seen = set()
+    for snapshot in result.get("Portfolio History", []):
+        date = pd.Timestamp(snapshot.get("Date")).normalize()
+        for ticker, shares in (snapshot.get("Holdings") or {}).items():
+            identity = get_ticker_identity(ticker)
+            if not shares or identity.public_end is None:
+                continue
+            public_end = pd.Timestamp(identity.public_end).normalize()
+            key = (ticker, public_end)
+            if date > public_end and key not in seen:
+                seen.add(key)
+                failures.append({
+                    "Ticker": ticker,
+                    "Last Public Date": str(public_end.date()),
+                    "First Unsupported Valuation Date": str(date.date()),
+                    "Reason": "Position valued after listing ended without verified terminal proceeds",
+                })
+    return failures

@@ -196,6 +196,13 @@ def main(argv=None):
     paper_dir, migration = prepare_paper_data_dir()
     cache_dir = default_cache_dir()
     apply_runtime_data_env(paper_dir, cache_dir)
+    # Initialize the stable ledger before declaring the local server ready.
+    # The dashboard also calls this idempotent helper, but an HTTP readiness
+    # probe alone does not necessarily create a Streamlit browser session and
+    # therefore must not be mistaken for completed application startup.
+    from paper_trading import storage as paper_storage
+
+    paper_storage.initialize_storage()
     log_path = default_logs_dir() / "desktop.log"
     default_logs_dir().mkdir(parents=True, exist_ok=True)
 

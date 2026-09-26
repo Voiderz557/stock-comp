@@ -192,3 +192,16 @@ as `historical_data/EA.parquet` can act as the secondary provider. See
   tickers are skipped, so affected results have incomplete coverage.
 - The historical snapshots currently begin in December 2021.
 - Transaction costs are modeled as a simple configurable percentage.
+Verified external historical files can be checked without modifying the production
+cache using the research-only staging command:
+
+```powershell
+python -m benchmarking.import_prices --input PATH.csv --ticker ATVI `
+  --candidate-dir PATH_TO_ISOLATED_CANDIDATE --stage-dir PATH_TO_NEW_STAGING_DIR `
+  --source-name "Provider/export name" --source-url "https://provider.example/dataset" `
+  --adjustment-convention adjusted
+```
+
+The command validates complete required sessions and OHLCV integrity, records
+checksums/provenance, and labels output as staged—not promoted. See
+`HISTORICAL_DATA_GAPS.md` for the current blocked symbols and sourcing requirements.

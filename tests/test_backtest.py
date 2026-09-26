@@ -414,6 +414,11 @@ class TickerIdentityTests(unittest.TestCase):
             listed_price_range("GFS", "2020-01-01", "2022-01-01")[0],
             pd.Timestamp("2021-10-28"),
         )
+        self.assertEqual(
+            listed_price_range("EA", "2026-08-01", "2026-08-10")[1],
+            pd.Timestamp("2026-08-05"),
+        )
+        self.assertIsNone(listed_price_range("EA", "2026-08-05", "2026-08-10"))
 
 
 class ListingBoundaryDownloadTests(unittest.TestCase):

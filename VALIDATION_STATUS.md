@@ -116,3 +116,10 @@ existing rows. Fresh/old adjusted-close ratios vary by more than 1% for some sym
 because adjusted history can change with later corporate actions, the tool replaces
 whole series and records ratios rather than splicing rows. Independent vendor
 cross-validation remains required before adopting the candidate cache.
+
+The current follow-up is documented in `HISTORICAL_DATA_GAPS.md`. Public endpoints
+from Yahoo and Nasdaq did not supply the six unresolved histories, and Stooq
+presented an automation challenge that was not bypassed. A source-neutral importer
+now permits validated staging of attributable CSV/Parquet files without production
+cache writes. Benchmark simulations also fail closed if a position remains held
+after a known listing end without modeled terminal proceeds.

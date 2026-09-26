@@ -31,7 +31,8 @@ class TickerIdentity:
 TICKER_IDENTITIES = {
     "EA": TickerIdentity(
         lifecycle_status=DELISTED_LATER,
-        note="Historically valid EA security; later acquisition/delisting.",
+        public_end=pd.Timestamp("2026-08-04"),
+        note="PIF/Silver Lake/Affinity acquisition; trading was suspended before the 2026-08-05 open.",
     ),
     "ATVI": TickerIdentity(
         lifecycle_status=DELISTED_LATER,
