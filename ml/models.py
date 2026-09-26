@@ -59,6 +59,7 @@ def infer_feature_columns(
         column
         for column in dataset.columns
         if column not in exclude
+        and not column.startswith("Label Available At:")
         and column not in categorical_present
         and pd.api.types.is_numeric_dtype(dataset[column])
     ]

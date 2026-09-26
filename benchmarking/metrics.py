@@ -31,7 +31,46 @@ TRIMMED_MEAN_PROPORTION = 0.10
 # edge is flagged as concentrated in a small number of extreme periods.
 EXTREME_WINNER_RELATIVE_DROP_THRESHOLD = 0.5
 
-TRADING_DAYS_PER_YEAR = 365.25
+CALENDAR_DAYS_PER_YEAR = 365.25
+TRADING_SESSIONS_PER_YEAR = 252
+DAILY_RISK_COLUMNS = (
+    "Daily Portfolio Volatility", "Annualized Portfolio Volatility",
+    "Daily Downside Deviation", "Annualized Portfolio Sharpe",
+    "Annualized Portfolio Sortino",
+)
+
+
+def compute_daily_portfolio_risk(portfolio_history):
+    """Close-to-close equity returns, including cash; no gap filling.
+
+    Sample SD (ddof=1). Annualization assumes 252 sessions and weak return
+    dependence. Ratios use a zero risk-free/target return. Downside is RMS
+    of min(return, 0) across ALL observations, not SD of losing days.
+    The first day's open-to-close move is excluded from close-to-close SD.
+    """
+    result = dict.fromkeys(DAILY_RISK_COLUMNS, np.nan)
+    if len(portfolio_history) < 3 or any("Date" not in row for row in portfolio_history):
+        return result
+    dates = pd.DatetimeIndex([row["Date"] for row in portfolio_history])
+    values = np.asarray([row["Portfolio Value"] for row in portfolio_history], dtype=float)
+    if (dates.hasnans or dates.has_duplicates or not dates.is_monotonic_increasing
+            or not np.isfinite(values).all() or (values <= 0).any()):
+        return result
+    returns = values[1:] / values[:-1] - 1
+    sigma = float(returns.std(ddof=1))
+    downside = float(np.sqrt(np.mean(np.minimum(returns, 0) ** 2)))
+    factor = np.sqrt(TRADING_SESSIONS_PER_YEAR)
+    result.update({
+        "Daily Portfolio Volatility": sigma,
+        "Annualized Portfolio Volatility": sigma * factor,
+        "Daily Downside Deviation": downside,
+    })
+    if len(returns) >= MIN_OBSERVATIONS_FOR_RATIOS:
+        if sigma > 1e-15:
+            result["Annualized Portfolio Sharpe"] = float(returns.mean() / sigma * factor)
+        if downside > 1e-15:
+            result["Annualized Portfolio Sortino"] = float(returns.mean() / downside * factor)
+    return result
 
 
 def compute_max_drawdown(portfolio_history):
@@ -71,8 +110,12 @@ def build_period_row(result, test_number):
         "Benchmark Return": float(result["Benchmark Return"]),
         "Excess Return": float(result["Total Return"] - result["Benchmark Return"]),
         "Number of Trades": len(result["Trades"]),
-        "Max Drawdown": compute_max_drawdown(result["Portfolio History"]),
+        "Max Drawdown": compute_max_drawdown(
+            [{"Portfolio Value": result.get("Starting Value", BACKTEST_STARTING_CASH)}]
+            + result["Portfolio History"]
+        ),
         "Turnover": compute_turnover(result),
+        **compute_daily_portfolio_risk(result["Portfolio History"]),
     }
 
 
@@ -90,6 +133,7 @@ def build_period_results_table(period_rows):
         "Number of Trades",
         "Max Drawdown",
         "Turnover",
+        *DAILY_RISK_COLUMNS,
     ]
     if not period_rows:
         return pd.DataFrame(columns=columns)
@@ -127,11 +171,17 @@ def compute_aggregate_metrics(period_rows):
     n = len(returns)
 
     chained_return = float(np.prod(1 + returns) - 1)
+    windows = sorted((row["Actual Start"], row["Actual End"]) for row in period_rows)
+    overlapping = any(right[0] <= left[1] for left, right in zip(windows, windows[1:]))
+    if overlapping:
+        # Independent, reset-capital experiments cannot be compounded when
+        # their calendar intervals overlap. Keep per-period statistics.
+        chained_return = np.nan
     total_days = sum(
         (row["Actual End"] - row["Actual Start"]).days for row in period_rows
     )
     annualized_return = (
-        float((1 + chained_return) ** (TRADING_DAYS_PER_YEAR / total_days) - 1)
+        float((1 + chained_return) ** (CALENDAR_DAYS_PER_YEAR / total_days) - 1)
         if total_days > 0
         else np.nan
     )
@@ -162,6 +212,7 @@ def compute_aggregate_metrics(period_rows):
 
     metrics = {
         "Periods Tested": n,
+        "Overlapping Periods": overlapping,
         "Total Return": chained_return,
         "Annualized Return": annualized_return,
         "Average Return": average_return,
@@ -188,8 +239,15 @@ def compute_aggregate_metrics(period_rows):
     }
     for threshold in COMPETITION_RETURN_THRESHOLDS:
         metrics[f"P(Return >= {int(round(threshold * 100))}%)"] = float(
-            (returns >= threshold).mean()
+            ((returns >= threshold) | np.isclose(returns, threshold, rtol=0, atol=1e-12)).mean()
         )
+    # Keep legacy cross-period keys for compatibility, but expose explicit
+    # labels so they cannot be mistaken for daily equity-curve risk.
+    metrics["Across-Period Return SD"] = volatility
+    for column in DAILY_RISK_COLUMNS:
+        observations = np.array([row.get(column, np.nan) for row in period_rows], dtype=float)
+        finite = observations[np.isfinite(observations)]
+        metrics[f"Mean {column}"] = float(finite.mean()) if len(finite) else np.nan
     metrics["Extreme Winner Dependent"] = _is_extreme_winner_dependent(
         average_return, trimmed_mean_return
     )

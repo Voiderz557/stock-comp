@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import re
 
 FORWARD_RETURN_HORIZONS_DAYS = (5, 20, 60)
 PRIMARY_LABEL_HORIZON_DAYS = 20
@@ -58,6 +59,19 @@ FIXED_CLASSIFICATION_COLUMNS = (
 
 def forward_return_column(horizon_days):
     return f"Forward Return {horizon_days}D"
+
+
+def label_available_column(target):
+    return f"Label Available At: {target}"
+
+
+def label_end_date(closes, feature_date, horizon):
+    if closes is None:
+        return pd.NaT
+    closes = closes.dropna()
+    if not has_sufficient_future_history(closes, feature_date, horizon):
+        return pd.NaT
+    return closes.index[closes.index.get_loc(pd.Timestamp(feature_date)) + horizon]
 
 
 def beats_benchmark_column(benchmark, horizon_days):
@@ -91,7 +105,7 @@ def label_column_names(
     names.append(positive_column(primary_horizon))
     names.append(return_ge_column(RETURN_GE_THRESHOLD_PCT, primary_horizon))
     names.extend(FIXED_CLASSIFICATION_COLUMNS)
-    return sorted(set(names))
+    return sorted(set(names + [label_available_column(name) for name in names]))
 
 
 def has_sufficient_future_history(closes, feature_date, horizon_days):
@@ -231,4 +245,18 @@ def compute_labels(
             fixed_primary_return, RETURN_GE_THRESHOLD_PCT
         )
 
+    # Record when each target becomes observable, separately from feature time.
+    # Relative-return targets need BOTH the stock and benchmark future close.
+    for name, value in list(labels.items()):
+        horizon = int(re.search(r"(\d+)D$", name).group(1))
+        available = label_end_date(ticker_closes, feature_date, horizon)
+        benchmark = None
+        if name.startswith("Beats "):
+            benchmark = name.split()[1]
+        elif name.startswith("beats_"):
+            benchmark = name.split("_")[1]
+        if benchmark is not None:
+            other = label_end_date(benchmark_closes.get(benchmark), feature_date, horizon)
+            available = max(available, other) if pd.notna(available) and pd.notna(other) else pd.NaT
+        labels[label_available_column(name)] = available if pd.notna(value) else pd.NaT
     return labels

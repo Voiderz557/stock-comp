@@ -12,6 +12,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pandas as pd
+from ml.labels import label_available_column
+
+
+def purge_unobserved_targets(dataset, target, known_by):
+    """Keep only targets actually available by the training cutoff; fail closed.
+
+    Legacy exported datasets without target timestamps must be regenerated.
+    Observation-date ordering alone does not prevent forward-label leakage.
+    """
+    column = label_available_column(target)
+    if column not in dataset:
+        raise ValueError(f"Missing {column}; regenerate the dataset to verify label timing.")
+    available = pd.to_datetime(dataset[column], errors="coerce")
+    return dataset.loc[available.notna() & (available <= pd.Timestamp(known_by))].copy()
 
 DEFAULT_MIN_TRAIN_DAYS = 365
 DEFAULT_VALIDATION_DAYS = 90

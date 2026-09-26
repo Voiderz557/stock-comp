@@ -54,7 +54,10 @@ class PromotionResult:
 
 
 def _is_finite(value):
-    return value is not None and not (isinstance(value, float) and math.isnan(value))
+    try:
+        return value is not None and math.isfinite(value)
+    except (TypeError, ValueError):
+        return False
 
 
 def evaluate_promotion(
@@ -175,6 +178,8 @@ def evaluate_promotion(
         <= PROMOTION_MAX_SINGLE_PERIOD_CONTRIBUTION_SHARE,
     }
 
+    if "Overlapping Periods" in ml_metrics:
+        criteria["Confirmation periods do not overlap"] = not ml_metrics["Overlapping Periods"]
     all_pass = all(criteria.values()) and not missing_required
     hard_reject = (
         median_excess_return is not None

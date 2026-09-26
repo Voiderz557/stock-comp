@@ -23,7 +23,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 
 from ml.models import infer_feature_columns, predicted_positive_probability
-from ml.validation import assert_no_temporal_leakage, split_dataset_by_fold
+from ml.validation import assert_no_temporal_leakage, split_dataset_by_fold, purge_unobserved_targets
 
 DEFAULT_TOP_N_LIST = (5, 10, 20)
 RANDOM_BASELINE_SEED = 42
@@ -205,6 +205,7 @@ def run_walk_forward_evaluation(
         train_df, validation_df = split_dataset_by_fold(dataset, fold, date_column=date_column)
         assert_no_temporal_leakage(train_df, validation_df, date_column=date_column)
 
+        train_df = purge_unobserved_targets(train_df, target_column, fold.train_end)
         train_df = train_df.dropna(subset=[target_column])
         validation_df = validation_df.dropna(subset=[target_column])
         if train_df.empty or validation_df.empty:

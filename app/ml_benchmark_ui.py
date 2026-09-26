@@ -339,9 +339,11 @@ else:
         "Beat SPY %",
         "Positive Period %",
         "Max Drawdown",
-        "Volatility",
-        "Sharpe Ratio",
-        "Sortino Ratio",
+        "Across-Period Return SD",
+        "Mean Daily Portfolio Volatility",
+        "Mean Annualized Portfolio Volatility",
+        "Mean Annualized Portfolio Sharpe",
+        "Mean Annualized Portfolio Sortino",
         "Trade Count",
         "Turnover",
         "Best Period Return",
@@ -355,6 +357,15 @@ else:
         cmap="Greens",
     )
     st.caption(f"**{highlight_column}** is the headline competition metric - highlighted above.")
+    st.caption(
+        "Portfolio volatility is sample standard deviation of daily close-to-close "
+        "equity returns (cash included); annualized volatility multiplies by sqrt(252). "
+        "Displayed risk metrics are means across completed periods, not one stitched "
+        "equity curve. Sharpe/Sortino use a zero risk-free/target return. Across-Period "
+        "Return SD instead measures dispersion between test outcomes. Overlapping "
+        "windows are not independent evidence; their compounded Total Return and "
+        "Annualized Return are unavailable."
+    )
     if not cfg.get("coverage_is_valid", True) or not cfg.get("leakage_audit_is_valid", True):
         st.warning(
             "These tables are shown for diagnosis only. Coverage or leakage "

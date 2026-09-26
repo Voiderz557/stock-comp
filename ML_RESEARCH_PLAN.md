@@ -1,5 +1,57 @@
 # ML Research Plan
 
+## Validation update: target timing and risk reporting
+
+The current validation pass found that ordering feature dates alone was not
+sufficient: a training row's forward target could mature after training ended.
+Benchmark training now receives price rows only through the training cutoff.
+Every label has a separate `Label Available At: <target>` timestamp, and
+walk-forward evaluation purges targets not yet observable at the fold cutoff.
+Old research datasets without those timestamps must be regenerated. Historical
+ML scores from before this fix must not be treated as out-of-sample evidence.
+
+The leakage audit now distinguishes omitted universe arguments from explicit
+`None` (point-in-time membership), so a small spot-check ticker list no longer
+replaces the full training universe when reconstructing training rows. Future
+shocks check frozen-model probabilities as well as features. These are sampled
+checks, not mathematical proof of the absence of every possible leak.
+
+Portfolio risk is now separately reported from dispersion between independent
+backtest experiments. Daily portfolio volatility is sample SD of consecutive
+close-to-close equity returns, including cash. Annualized volatility is that SD
+times sqrt(252). Daily downside deviation is RMS of min(return, 0), over all
+observations. Daily-derived Sharpe/Sortino use zero risk-free/target returns and
+sqrt(252) annualization. The first open-to-close move is not a daily close-to-close
+observation. Aggregate risk columns are means of per-period measurements.
+Legacy cross-period ratio columns remain in exports for compatibility.
+
+Overlapping experiments no longer produce a compounded total or annualized
+return. Their descriptive statistics are not independent confirmation evidence,
+and an overlapping result cannot qualify for PROMOTE. Required price coverage
+and completion of every requested method/period pair are also validity gates.
+
+Repeat the read-only local-data preflight with:
+
+```powershell
+.\.venv\Scripts\python.exe -m benchmarking.validate
+```
+
+An explicitly INVALID, diagnostic-only five-month pilot can be run with
+`--pilot --diagnostic`. This uses the real benchmark runner, all six strategies,
+regime switching, and both ML models at Top 5/10/20. It reads existing real-price
+files without downloading or modifying them. Reports are saved under the ignored
+`benchmark_exports/validation-<UTC timestamp>/` directory. This pilot is not a
+final holdout and must never be used to tune models or claim profitability.
+
+Before scaling: repair missing sessions, obtain traceable delisted histories,
+verify compatible split/dividend adjustments across providers, review terminal
+delisting proceeds and stale valuations, and reserve a genuinely unused holdout.
+Existing prices are auto-adjusted; the historical $5 filter's interpretation
+and exact share/corporate-action accounting still need independent validation.
+The historical universe is reconstructed, not a licensed constituent feed.
+Five months is the primary competition horizon; six months is a sensitivity
+check. No 100-window study is valid while required data is missing.
+
 This document describes the `ml/` package: a research-only foundation for
 building historical, point-in-time-safe feature datasets and evaluating
 simple classification models that **rank** stocks. It does **not** place

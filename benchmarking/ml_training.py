@@ -17,6 +17,8 @@ import pandas as pd
 
 from ml.dataset import build_feature_dataset, get_supervised_subset
 from ml.models import MODEL_BUILDERS, infer_feature_columns
+from ml.validation import purge_unobserved_targets
+from ml.labels import label_available_column
 
 # ~3 years of weekly-sampled history to train on before every period. This is
 # a readable, fixed constant - not tuned against any benchmark result.
@@ -43,6 +45,7 @@ class TrainedMLFold:
     training_rows: int
     validation_rows: int
     class_balance: dict
+    latest_training_label_at: pd.Timestamp | None = None
 
 
 @dataclass(frozen=True)
@@ -111,7 +114,8 @@ def prepare_training_fold(
         training_end,
         universe=universe,
         rebalance_frequency="weekly",
-        price_data=price_data,
+        price_data={ticker: frame.loc[frame.index <= training_end] if frame is not None else None
+                    for ticker, frame in price_data.items()},
         include_strategy_features=include_strategy_features,
         progress_callback=progress_callback,
     )
@@ -120,6 +124,7 @@ def prepare_training_fold(
             f"No labeled training rows before {pd.Timestamp(period_start).date()}."
         )
     supervised = get_supervised_subset(training_dataset, target_column)
+    supervised = purge_unobserved_targets(supervised, target_column, training_end)
     if (
         len(supervised) < MIN_TRAINING_ROWS
         or supervised[target_column].astype(bool).nunique() < 2
@@ -171,6 +176,9 @@ def fit_prepared_fold(model_name, prepared_fold):
         training_rows=len(prepared_fold.supervised),
         validation_rows=0,
         class_balance=class_balance,
+        latest_training_label_at=pd.to_datetime(
+            prepared_fold.supervised[label_available_column(prepared_fold.target_column)]
+        ).max(),
     )
 
 

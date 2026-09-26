@@ -11,6 +11,7 @@ recommendation (see `benchmarking.promotion`).
 from __future__ import annotations
 
 import pandas as pd
+import numpy as np
 
 from ml.dataset import build_feature_dataset, get_supervised_subset
 from ml.features import (
@@ -20,6 +21,8 @@ from ml.features import (
 )
 from ml.labels import label_column_names
 from ml.validation import assert_no_temporal_leakage
+from ml.validation import purge_unobserved_targets
+from ml.models import predicted_positive_probability
 from market.regime import classify_market_regime, compute_market_features
 
 from benchmarking.ml_training import TRAINING_TARGET_COLUMN
@@ -27,6 +30,7 @@ from benchmarking.ml_training import TRAINING_TARGET_COLUMN
 # Only re-verify a handful of folds/tickers per check - this keeps the audit
 # fast while still exercising real code paths on real data every run.
 MAX_FOLDS_TO_REVERIFY = 3
+_UNSPECIFIED_UNIVERSE = object()
 
 # Multiplier used to "shock" future rows when proving future data cannot
 # alter earlier feature values/predictions.
@@ -57,12 +61,16 @@ def _run_check_safely(name, check_callable):
 
 def _check_training_before_validation(trained_folds):
     violations = [
-        fold for fold in trained_folds if not (fold.training_end < fold.period_start)
+        fold for fold in trained_folds if not (
+            fold.training_end < fold.period_start
+            and pd.notna(getattr(fold, "latest_training_label_at", None))
+            and fold.latest_training_label_at <= fold.training_end
+        )
     ]
     return _check(
         "Training dates strictly before validation/period dates",
         not violations,
-        "Every fold's training_end is strictly before its period_start."
+        "Every fold's observations and latest training target availability precede its period_start."
         if not violations
         else f"{len(violations)} fold(s) violate this, e.g. {violations[0].model_name}"
         f"@{violations[0].period_start.date()}.",
@@ -101,7 +109,7 @@ def _check_no_train_validation_overlap(trained_folds):
 
 
 def _check_fitted_on_training_rows_only(
-    price_data, universe, trained_folds, progress_callback=None, dataset_universe=None
+    price_data, universe, trained_folds, progress_callback=None, dataset_universe=_UNSPECIFIED_UNIVERSE
 ):
     """Rebuild each sampled fold's training set and confirm it matches exactly.
 
@@ -113,7 +121,7 @@ def _check_fitted_on_training_rows_only(
     universe used during training (`None` means point-in-time Nasdaq-100).
     Models that share a training window reuse one rebuilt dataset.
     """
-    if dataset_universe is None:
+    if dataset_universe is _UNSPECIFIED_UNIVERSE:
         dataset_universe = universe
     violations = []
     rebuilt_datasets = {}
@@ -131,10 +139,12 @@ def _check_fitted_on_training_rows_only(
                 fold.training_end,
                 universe=dataset_universe,
                 rebalance_frequency="weekly",
-                price_data=price_data,
+                price_data={ticker: frame.loc[frame.index <= fold.training_end] if frame is not None else None
+                            for ticker, frame in price_data.items()},
             )
         dataset = rebuilt_datasets[rebuild_key]
         supervised = get_supervised_subset(dataset, TRAINING_TARGET_COLUMN)
+        supervised = purge_unobserved_targets(supervised, TRAINING_TARGET_COLUMN, fold.training_end)
         if len(supervised) != fold.training_rows:
             violations.append(
                 f"{fold.model_name}@{fold.period_start.date()}: rebuilt training set has "
@@ -150,7 +160,7 @@ def _check_fitted_on_training_rows_only(
 
 
 def _check_preprocessor_and_model_fitted_on_training_only(
-    price_data, universe, trained_folds, progress_callback=None, dataset_universe=None
+    price_data, universe, trained_folds, progress_callback=None, dataset_universe=_UNSPECIFIED_UNIVERSE
 ):
     violations = _check_fitted_on_training_rows_only(
         price_data,
@@ -254,10 +264,22 @@ def _check_future_rows_cannot_alter_earlier_predictions(price_data, universe, tr
             mismatches.append(key)
 
     passed = not mismatches
+    # Actually compare probabilities, not just input features. Each sampled
+    # frozen pipeline receives exactly its own numeric/categorical columns.
+    for sampled_fold in trained_folds[:MAX_FOLDS_TO_REVERIFY]:
+        columns = sampled_fold.feature_columns + sampled_fold.categorical_columns
+        original = pd.DataFrame([{key: original_row.get(key, np.nan) for key in columns}])
+        shocked = pd.DataFrame([{key: shocked_row.get(key, np.nan) for key in columns}])
+        before = predicted_positive_probability(sampled_fold.pipeline, original)
+        after = predicted_positive_probability(sampled_fold.pipeline, shocked)
+        if not (np.isfinite(before).all() and np.isfinite(after).all()
+                and np.allclose(before, after, rtol=0, atol=1e-12)):
+            mismatches.append(f"{sampled_fold.model_name} predicted probability")
+            passed = False
     return _check(
         "Future rows cannot alter earlier predictions",
         passed,
-        f"Shocking every row after {as_of.date()} did not change any feature computed as of that date."
+        f"Shocking every row after {as_of.date()} preserved historical features and sampled frozen-model probabilities."
         if passed
         else f"Feature drift detected after shocking future rows in: {mismatches}.",
     )
@@ -294,7 +316,7 @@ def run_leakage_audit(
     universe,
     feature_columns,
     progress_callback=None,
-    dataset_universe=None,
+    dataset_universe=_UNSPECIFIED_UNIVERSE,
 ):
     """Run every leakage check and return `{"Checks": [...], "Is Valid": bool}`.
 
@@ -307,7 +329,7 @@ def run_leakage_audit(
     Nasdaq-100). `universe` may be a smaller spot-check list for per-ticker
     probes.
     """
-    if dataset_universe is None:
+    if dataset_universe is _UNSPECIFIED_UNIVERSE:
         dataset_universe = universe
 
     def _notify(detail):

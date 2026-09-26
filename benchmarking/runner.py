@@ -33,6 +33,7 @@ from ml.models import MODEL_BUILDERS
 from strategies.registry import available_strategy_names, get_strategy
 
 from benchmarking.leakage_audit import run_leakage_audit
+from benchmarking.coverage import audit_price_coverage
 from benchmarking.metrics import build_aggregate_table, build_period_results_table, build_period_row
 from benchmarking.ml_training import (
     InsufficientTrainingDataError,
@@ -387,6 +388,15 @@ def run_benchmark(
         downloaded_data = price_data
         data_coverage = _merge_coverage_reports()
 
+    data_coverage = _merge_coverage_reports(
+        data_coverage,
+        audit_price_coverage(
+            downloaded_data,
+            effective_training_start_floor if ml_models else evaluation_start_date,
+            evaluation_end_date,
+            universe=universe, benchmark=benchmark,
+        ),
+    )
     reset_feature_cache()
     data_coverage["Coverage Diagnosis"] = diagnose_coverage_failures(
         data_coverage.get("Data Source Failures") or [],
@@ -552,6 +562,20 @@ def run_benchmark(
             progress_callback=_audit_progress,
             dataset_universe=universe,
         )
+
+    expected_methods = set(requested_strategies)
+    if include_regime_switching:
+        expected_methods.add(REGIME_SWITCHING_METHOD_NAME)
+    expected_methods.update(f"{model} Top {n}" for model in ml_models for n in top_n_values)
+    expected_pairs = {(method, number) for method in expected_methods for number in range(1, len(periods) + 1)}
+    actual_pairs = set(zip(period_table["Method"], period_table["Test"]))
+    complete = bool(expected_pairs) and actual_pairs == expected_pairs and len(period_table) == len(expected_pairs)
+    leakage_audit["Checks"].append({
+        "Check": "Every requested method completed identical evaluation periods",
+        "Passed": complete,
+        "Detail": "All method/period pairs completed" if complete else f"Missing method/period pairs: {sorted(expected_pairs - actual_pairs)}",
+    })
+    leakage_audit["Is Valid"] = bool(leakage_audit["Is Valid"] and complete)
 
     existing_method_names = list(available_names) + (
         [REGIME_SWITCHING_METHOD_NAME] if include_regime_switching else []

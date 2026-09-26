@@ -1,5 +1,11 @@
 # Stock-Comp Master Development Plan
 
+Current verification checkpoint: see [VALIDATION_STATUS.md](VALIDATION_STATUS.md).
+The broad roadmap below includes historical/future aspirations; it is not a
+claim that every item is implemented. Large performance comparisons are currently
+gated on historical-data coverage, with five months primary and six months as
+sensitivity. No algorithm tuning should rely on pre-fix ML results.
+
 ## 1. Project Mission
 
 ### Immediate goal
