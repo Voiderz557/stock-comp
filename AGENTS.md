@@ -18,5 +18,7 @@ When the user says **idle work** for this project:
 5. Do not interpret the phrase as permission to deploy, incur costs, execute
    trades, commit, push, or modify live account data.
 
-The coordinator in `coordinator/` has its own `AGENTS.md` and role rules; keep
-those instructions intact when working there.
+Project roadmaps, research evidence, and release notes live in `docs/`.
+Keep optional coding-agent tools outside the application repository. Shared
+project instructions remain here and in `web/AGENTS.md`; do not replace them
+with implementer/reviewer role restrictions from external tools.

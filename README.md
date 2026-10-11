@@ -1,4 +1,4 @@
-# Stock Strategy Backtester
+# Stock Competition
 
 This project scans stocks and tests stock-selection strategies against a market
 benchmark. The backtester supports reproducible random periods, point-in-time
@@ -6,15 +6,27 @@ Nasdaq-100 membership, local price caching, delisted-ticker failure reporting,
 and side-by-side strategy comparison.
 
 For the current product priorities, verified limitations, and implementation
-checklist, see [PROJECT_MASTER_ROADMAP.md](PROJECT_MASTER_ROADMAP.md).
+checklist, see [PROJECT_MASTER_ROADMAP.md](docs/PROJECT_MASTER_ROADMAP.md).
+The [documentation index](docs/README.md) collects setup guides, research evidence,
+and release limitations. Run the commands in those documents from the repository
+root unless a different working directory is explicitly stated.
 
 ## Project structure
 
-- `app/` — Streamlit backtest interface
+- `web/` — multi-user website; see [web setup](web/README.md)
+- `api/` — authenticated website API and cloud account adapter
+- `app/` — local daily assistant and Streamlit research/backtest interfaces
+- `desktop/` — Windows wrapper; existing launch/build scripts stay at the root
+- `paper_trading/` — paper account storage, saved plans, and explicit paper actions
 - `strategies/` — strategy implementations and the strategy registry
 - `backtesting/` — simulation engine, random periods, summaries, and ZIP export
+- `benchmarking/` and `ml/` — research-only evaluation and ranking
+- `market/` — regime, breadth, and volatility context
 - `data/` — historical universes, ticker identities, and market-data providers
 - `scanner/` — current-market scanner and its chart dashboard
+- `deployment/` — hosted website source and Python API deployment preparation
+- `supabase/` — database migrations, account isolation, and SQL tests
+- `docs/` — roadmaps, validation evidence, and research history
 - `historical_data/` — optional manually supplied historical Parquet files
 - `tests/` — regression tests
 - `config.py` — user-configurable defaults and competition constraints
@@ -207,4 +219,5 @@ python -m benchmarking.import_prices --input PATH.csv --ticker ATVI `
 
 The command validates complete required sessions and OHLCV integrity, records
 checksums/provenance, and labels output as staged—not promoted. See
-`HISTORICAL_DATA_GAPS.md` for the current blocked symbols and sourcing requirements.
+[HISTORICAL_DATA_GAPS.md](docs/HISTORICAL_DATA_GAPS.md) for the current blocked
+symbols and sourcing requirements.

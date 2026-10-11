@@ -31,6 +31,7 @@ web/out/
 # Provider CLI state and independently managed Sites checkout.
 supabase/.temp/
 sites/
+.cursor/
 # Hosted source is preserved in deployment/chatgpt-site; generated output is not.
 deployment/chatgpt-site/out/
 *.tsbuildinfo

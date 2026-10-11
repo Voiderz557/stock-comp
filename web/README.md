@@ -23,7 +23,7 @@ python -m api.run_local
 The local launcher copies only the Supabase URL, publishable key, and demo-mode
 flag. It never loads OAuth client secrets or a Supabase service-role key.
 
-Copy `.env.example` to `.env.local` only when configuring local public values. Apply the SQL migrations in `supabase/migrations/` before using cloud accounts; the latest migration adds estimated-close paper actions and history. The browser needs the Supabase URL and publishable key; the API needs its corresponding server-side environment variables. Production authentication and persistence must follow `../PUBLIC_APP_ARCHITECTURE.md`. Do not add service-role keys, market-data secrets, or other privileged credentials to `NEXT_PUBLIC_*` variables.
+Copy `.env.example` to `.env.local` only when configuring local public values. Apply the SQL migrations in `supabase/migrations/` before using cloud accounts; the latest migration adds estimated-close paper actions and history. The browser needs the Supabase URL and publishable key; the API needs its corresponding server-side environment variables. Production authentication and persistence must follow `../docs/PUBLIC_APP_ARCHITECTURE.md`. Do not add service-role keys, market-data secrets, or other privileged credentials to `NEXT_PUBLIC_*` variables.
 
 `bizwax.org` is the intended public domain, but no public host or DNS record has been selected or deployed by this repo. Once the host is chosen, set `NEXT_PUBLIC_SITE_URL` to its exact HTTPS origin, add that origin and `/auth/callback` URL to Supabase's site/redirect allow list, add the origin to the Google Web OAuth client's Authorized JavaScript origins, and test login/logout on that host. DNS, HTTPS, and the hosting provider must be configured separately. Do not point OAuth redirects at the current localhost URL for public launch.
 
@@ -88,7 +88,7 @@ may take longer or have unavailable quotes. Changing either setting takes
 effect when the plan is rebuilt, never by silently rewriting an existing plan.
 The Research page shows a separately dated VIX reading; it does not modify
 strategy scores or the SPY/QQQ realized-volatility regime rule. See
-`../PROJECT_MASTER_ROADMAP.md` for the larger implementation and validation plan.
+`../docs/PROJECT_MASTER_ROADMAP.md` for the larger implementation and validation plan.
 
 Optional stop-loss and take-profit toggles display **advisory SELL levels**
 when inspecting a current BUY recommendation. The read-only dated-data endpoint

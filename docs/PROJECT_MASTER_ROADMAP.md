@@ -221,4 +221,4 @@ Automatic real trading, copying a TikTok prompt into a trade engine, paid data/A
 - [HISTORICAL_DATA_GAPS.md](HISTORICAL_DATA_GAPS.md) — missing delisted histories and acquisition handling.
 - [PUBLIC_APP_ARCHITECTURE.md](PUBLIC_APP_ARCHITECTURE.md) — cloud identity, isolation, and data architecture.
 - [MARKET_WATCHER.md](MARKET_WATCHER.md) — existing local read-only watcher.
-- [web/README.md](web/README.md) — website setup and current workflow.
+- [web/README.md](../web/README.md) — website setup and current workflow.
