@@ -5,6 +5,9 @@ benchmark. The backtester supports reproducible random periods, point-in-time
 Nasdaq-100 membership, local price caching, delisted-ticker failure reporting,
 and side-by-side strategy comparison.
 
+For the current product priorities, verified limitations, and implementation
+checklist, see [PROJECT_MASTER_ROADMAP.md](PROJECT_MASTER_ROADMAP.md).
+
 ## Project structure
 
 - `app/` — Streamlit backtest interface

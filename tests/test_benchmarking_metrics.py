@@ -87,6 +87,18 @@ class AggregateMetricsTests(unittest.TestCase):
         metrics = compute_aggregate_metrics(rows)
         self.assertFalse(pd.isna(metrics["Sharpe Ratio"]))
 
+    def test_sortino_uses_all_periods_for_downside_rms(self):
+        returns = [0.10, 0.05, -0.02, 0.03, 0.08]
+        metrics = compute_aggregate_metrics(
+            [_period_row(i, value) for i, value in enumerate(returns)]
+        )
+        downside_rms = (sum(min(value, 0) ** 2 for value in returns) / len(returns)) ** 0.5
+        self.assertAlmostEqual(metrics["Sortino Ratio"], (sum(returns) / len(returns)) / downside_rms)
+
+    def test_sortino_handles_equal_losing_periods(self):
+        metrics = compute_aggregate_metrics([_period_row(i, -0.01) for i in range(5)])
+        self.assertAlmostEqual(metrics["Sortino Ratio"], -1.0)
+
     def test_extreme_winner_dependence_is_flagged(self):
         # 9 modest losses and one enormous winner: the plain average is
         # positive and dominated by that one period.

@@ -31,7 +31,7 @@ from ml.feature_cache import (
     history_fingerprint,
 )
 from strategies.mean_reversion_v1 import calculate_rsi
-from strategies.registry import available_strategy_names, get_strategy, invoke_analyze
+from strategies.registry import get_strategy, invoke_analyze, ml_feature_strategy_names
 
 # ---------------------------------------------------------------------------
 # Lookback windows (trading days). Every threshold here is a named constant,
@@ -93,7 +93,7 @@ _PRICE_FEATURE_REQUIRED_HISTORY_DAYS = max(
 
 def _strategy_required_history_days():
     return max(
-        (get_strategy(name).required_history_days for name in available_strategy_names()),
+        (get_strategy(name).required_history_days for name in ml_feature_strategy_names()),
         default=0,
     )
 
@@ -400,8 +400,21 @@ def indicator_table_for(ticker, frame):
     with cache["lock"]:
         registered = cache["tables_by_ticker"].get(ticker)
         if registered is not None:
-            cache["stats"]["indicator_hits"] += 1
-            return registered
+            requested = pd.to_numeric(frame["Close"], errors="coerce").dropna()
+            registered_values = registered.reindex(requested.index)["Price"]
+            same_history = (
+                not requested.empty
+                and not registered_values.isna().any()
+                and np.allclose(
+                    registered_values.to_numpy(dtype=float),
+                    requested.to_numpy(dtype=float),
+                    rtol=1e-12,
+                    atol=1e-12,
+                )
+            )
+            if same_history:
+                cache["stats"]["indicator_hits"] += 1
+                return registered
         fingerprint = history_fingerprint(frame)
         key = (ticker, fingerprint)
         cached = cache["indicator_tables"].get(key)
@@ -479,7 +492,7 @@ def compute_strategy_features(ticker, historical_data, benchmark_data=None, use_
             None if as_of is None else pd.Timestamp(as_of),
             history_fingerprint(historical_data),
             history_fingerprint(benchmark_data) if benchmark_data is not None else None,
-            tuple(available_strategy_names()),
+            tuple(ml_feature_strategy_names()),
         )
         with cache["lock"]:
             cached = cache["strategy_features"].get(cache_key)
@@ -489,7 +502,7 @@ def compute_strategy_features(ticker, historical_data, benchmark_data=None, use_
             cache["stats"]["strategy_misses"] += 1
 
     strategy_features = {}
-    for name in available_strategy_names():
+    for name in ml_feature_strategy_names():
         result = invoke_analyze(
             get_strategy(name).analyze,
             ticker,

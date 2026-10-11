@@ -68,6 +68,27 @@ class PromotionGateTests(unittest.TestCase):
         )
         self.assertEqual(result.decision, RESEARCH_MORE)
 
+    def test_tiny_sharpe_gain_cannot_bypass_lower_return_probability(self):
+        ml_metrics = _metrics(**{"P(Return >= 20%)": 0.30, "Sharpe Ratio": 1.001})
+        existing_metrics = _metrics(**{"P(Return >= 20%)": 0.40, "Sharpe Ratio": 1.0})
+        result = evaluate_promotion(
+            "Logistic Regression Top 10", ml_metrics, existing_metrics,
+            "Baseline", [0.05, 0.10, 0.15, 0.20, -0.02] * 4,
+        )
+        self.assertEqual(result.decision, RESEARCH_MORE)
+        self.assertFalse(result.criteria[
+            "P(Return >= 20%) >= best existing strategy OR clearly improved Sharpe Ratio"
+        ])
+
+    def test_material_sharpe_gain_can_bypass_lower_return_probability(self):
+        ml_metrics = _metrics(**{"P(Return >= 20%)": 0.30, "Sharpe Ratio": 1.11})
+        existing_metrics = _metrics(**{"P(Return >= 20%)": 0.40, "Sharpe Ratio": 1.0})
+        result = evaluate_promotion(
+            "Logistic Regression Top 10", ml_metrics, existing_metrics,
+            "Baseline", [0.05, 0.10, 0.15, 0.20, -0.02] * 4,
+        )
+        self.assertEqual(result.decision, PROMOTE)
+
     def test_failed_leakage_audit_forces_invalid_regardless_of_metrics(self):
         ml_metrics = _metrics()
         existing_metrics = _metrics()

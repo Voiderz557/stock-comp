@@ -79,7 +79,7 @@ class PreListingFailureIsNotRequiredTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
             cache_dir = Path(cache_dir)
             listed = cache_frame("2022-01-19", "2024-11-20")
-            listed.to_parquet(cache_dir / "CEG.parquet")
+            listed.to_pickle(cache_dir / "CEG.pkl")
             (cache_dir / "coverage.json").write_text(
                 json.dumps(
                     {

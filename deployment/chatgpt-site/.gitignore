@@ -1,0 +1,21 @@
+.sites-checkout/
+.sites-runtime/
+node_modules/
+*.tar
+.next/
+out/
+.env*
+*.sqlite3*
+__pycache__/
+dist/server/
+dist/.openai/
+*.tsbuildinfo
+# Shared frontend is generated from the repository's web/ source by sync-frontend.
+app/
+components/
+lib/
+public/
+AGENTS.md
+tsconfig.json
+next-env.d.ts
+next.config.ts

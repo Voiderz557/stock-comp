@@ -8,6 +8,7 @@ from . import (
     aggressive_momentum_v1,
     baseline,
     breakout_volume_v1,
+    controlled_breakout_v1,
     mean_reversion_v1,
     momentum_v2,
     relative_strength_momentum_v1,
@@ -22,6 +23,8 @@ class StrategyDefinition:
     parameters: dict
     required_history_days: int
     benchmark_ticker: Optional[str] = None
+    live_enabled: bool = True
+    ml_feature_enabled: bool = True
 
 
 _STRATEGIES = {
@@ -68,6 +71,15 @@ _STRATEGIES = {
         parameters=mean_reversion_v1.PARAMETERS,
         required_history_days=mean_reversion_v1.REQUIRED_HISTORY_DAYS,
     ),
+    "Controlled Breakout V1": StrategyDefinition(
+        name="Controlled Breakout V1",
+        analyze=controlled_breakout_v1.analyze,
+        rank_key=controlled_breakout_v1.rank_key,
+        parameters=controlled_breakout_v1.PARAMETERS,
+        required_history_days=controlled_breakout_v1.REQUIRED_HISTORY_DAYS,
+        live_enabled=False,
+        ml_feature_enabled=False,
+    ),
 }
 
 
@@ -106,6 +118,16 @@ def extra_strategy_benchmark_tickers():
 
 def available_strategy_names():
     return list(_STRATEGIES)
+
+
+def live_strategy_names():
+    """Registered strategies approved for the live paper-trading dashboard."""
+    return [name for name, definition in _STRATEGIES.items() if definition.live_enabled]
+
+
+def ml_feature_strategy_names():
+    """Registered strategies approved as ML inputs before clean validation."""
+    return [name for name, definition in _STRATEGIES.items() if definition.ml_feature_enabled]
 
 
 def get_strategy(name):

@@ -29,6 +29,11 @@ class TickerIdentity:
 # avoid requesting impossible Yahoo ranges. They never remove a historically
 # valid constituent from a universe or backtest.
 TICKER_IDENTITIES = {
+    "WBD": TickerIdentity(
+        lifecycle_status=DELISTED_LATER,
+        public_end=pd.Timestamp("2026-10-05"),
+        note="Warner Bros. Discovery acquisition; Nasdaq announced 2026-10-05 as the last trading day.",
+    ),
     "EA": TickerIdentity(
         lifecycle_status=DELISTED_LATER,
         public_end=pd.Timestamp("2026-08-04"),
@@ -93,6 +98,10 @@ TICKER_IDENTITIES = {
         note="GlobalFoundries IPO; first regular-session trade 2021-10-28.",
     ),
     "ARM": TickerIdentity(public_start=pd.Timestamp("2023-09-14")),
+    "SPCX": TickerIdentity(
+        public_start=pd.Timestamp("2026-06-12"),
+        note="Nasdaq announced 2026-06-12 as the first SPCX trading day; earlier Yahoo ranges are impossible, not provider failures.",
+    ),
     "ALAB": TickerIdentity(public_start=pd.Timestamp("2024-03-20")),
     "CRWV": TickerIdentity(public_start=pd.Timestamp("2025-03-28")),
     "WBA": TickerIdentity(
@@ -111,6 +120,12 @@ def get_provider_symbol(ticker):
     return get_ticker_identity(ticker).provider_symbol or ticker
 
 
+def _session_date(value):
+    """Return a naive date label for provider and listing-boundary checks."""
+    timestamp = pd.Timestamp(value)
+    return timestamp.tz_localize(None).normalize()
+
+
 def provider_fetch_segments(ticker, start, end_exclusive):
     """Yahoo symbol/date segments for `[start, end_exclusive)`.
 
@@ -118,8 +133,8 @@ def provider_fetch_segments(ticker, start, end_exclusive):
     A symbol change is split only when the new Yahoo series does not cover
     the pre-rename history (`split_provider_history=True`).
     """
-    start = pd.Timestamp(start).normalize()
-    end_exclusive = pd.Timestamp(end_exclusive).normalize()
+    start = _session_date(start)
+    end_exclusive = _session_date(end_exclusive)
     if start >= end_exclusive:
         return []
     identity = get_ticker_identity(ticker)
@@ -131,7 +146,7 @@ def provider_fetch_segments(ticker, start, end_exclusive):
         or not identity.provider_symbol
     ):
         return [(current_symbol, start, end_exclusive)]
-    change = pd.Timestamp(change).normalize()
+    change = _session_date(change)
     segments = []
     if start < change:
         segments.append((ticker, start, min(end_exclusive, change)))
@@ -144,8 +159,8 @@ def provider_fetch_segments(ticker, start, end_exclusive):
 
 def lifecycle_status_for_period(ticker, start_date, end_date):
     identity = get_ticker_identity(ticker)
-    start_date = pd.Timestamp(start_date).normalize()
-    end_date = pd.Timestamp(end_date).normalize()
+    start_date = _session_date(start_date)
+    end_date = _session_date(end_date)
     if identity.public_start is not None and end_date < identity.public_start:
         return NOT_PUBLIC_YET
     if identity.public_end is not None and start_date > identity.public_end:
@@ -162,17 +177,17 @@ def listed_price_range(ticker, start, end_exclusive):
     ticker is permanently unavailable on other dates.
     """
     identity = get_ticker_identity(ticker)
-    start = pd.Timestamp(start).normalize()
-    end_exclusive = pd.Timestamp(end_exclusive).normalize()
+    start = _session_date(start)
+    end_exclusive = _session_date(end_exclusive)
     if start >= end_exclusive:
         return None
     if identity.public_start is not None:
-        listed_start = pd.Timestamp(identity.public_start).normalize()
+        listed_start = _session_date(identity.public_start)
         if end_exclusive <= listed_start:
             return None
         start = max(start, listed_start)
     if identity.public_end is not None:
-        listed_end_exclusive = pd.Timestamp(identity.public_end).normalize() + pd.Timedelta(days=1)
+        listed_end_exclusive = _session_date(identity.public_end) + pd.Timedelta(days=1)
         if start >= listed_end_exclusive:
             return None
         end_exclusive = min(end_exclusive, listed_end_exclusive)

@@ -91,6 +91,28 @@ class RunBenchmarkTests(unittest.TestCase):
         for method in self.result.promotion_table["Method"]:
             self.assertTrue(method.startswith("Logistic Regression Top"))
 
+    def test_validation_rows_count_unique_predictions_across_top_n(self):
+        folds = self.result.fold_metrics_table
+        if folds.empty:
+            self.skipTest("No ML fold trained successfully for this tiny synthetic run.")
+        attribution = self.result.candidate_attribution_table
+        for test_number, (period_start, _) in enumerate(self.result.periods, start=1):
+            matching_folds = folds[folds["Period Start"] == period_start]
+            if matching_folds.empty:
+                continue
+            observations = attribution[
+                (attribution["Test"] == test_number)
+                & attribution["Method"].str.startswith("Logistic Regression Top")
+            ]
+            unique_count = len(observations.drop_duplicates(["Date", "Ticker"]))
+            self.assertEqual(matching_folds.iloc[0]["Validation Rows"], unique_count)
+            if unique_count:
+                self.assertGreater(len(observations), unique_count)
+        self.assertEqual(
+            self.result.feature_stability_summary.iloc[0]["Predictions"],
+            folds["Validation Rows"].sum(),
+        )
+
     def test_failed_leakage_audit_forces_every_promotion_to_reject(self):
         # Directly exercise the "failed audit invalidates the benchmark"
         # requirement using the runner's own promotion wiring: re-evaluate
@@ -207,6 +229,61 @@ class RunBenchmarkTests(unittest.TestCase):
         )
         self.assertEqual(result.config["number_of_tests"], 3)
         self.assertEqual(len(result.periods), 3)
+
+    def test_exclusions_require_explicit_exploratory_mode(self):
+        with self.assertRaisesRegex(ValueError, "explicit exploratory_blacklist_mode"):
+            run_benchmark(
+                duration="1 month",
+                earliest_allowed=self.earliest_allowed,
+                latest_allowed=self.latest_allowed,
+                number_of_tests=1,
+                random_seed=1,
+                requested_strategies=("Baseline",),
+                include_regime_switching=False,
+                ml_models=(),
+                universe=list(BENCHMARK_TICKERS),
+                price_data=self.price_data,
+                excluded_tickers=(BENCHMARK_TICKERS[0],),
+            )
+
+    def test_exploratory_blacklist_is_non_promotable_and_recorded(self):
+        excluded = BENCHMARK_TICKERS[0]
+        result = run_benchmark(
+            duration="1 month",
+            earliest_allowed=self.earliest_allowed,
+            latest_allowed=self.latest_allowed,
+            number_of_tests=1,
+            random_seed=1,
+            requested_strategies=("Baseline",),
+            include_regime_switching=False,
+            ml_models=(),
+            universe=list(BENCHMARK_TICKERS),
+            price_data=self.price_data,
+            exploratory_blacklist_mode=True,
+            excluded_tickers=(excluded.lower(),),
+        )
+        self.assertTrue(result.config["exploratory_blacklist_mode"])
+        self.assertEqual(result.config["result_classification"], "NON_PROMOTABLE")
+        self.assertFalse(result.config["promotion_allowed"])
+        self.assertFalse(result.config["benchmark_valid"])
+        self.assertEqual(result.config["excluded_tickers"], [excluded])
+
+    def test_exploratory_blacklist_rejects_ml_models(self):
+        with self.assertRaisesRegex(ValueError, "rule-based only"):
+            run_benchmark(
+                duration="1 month",
+                earliest_allowed=self.earliest_allowed,
+                latest_allowed=self.latest_allowed,
+                number_of_tests=1,
+                random_seed=1,
+                requested_strategies=("Baseline",),
+                include_regime_switching=False,
+                ml_models=("Logistic Regression",),
+                universe=list(BENCHMARK_TICKERS),
+                price_data=self.price_data,
+                exploratory_blacklist_mode=True,
+                excluded_tickers=(BENCHMARK_TICKERS[0],),
+            )
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -32,6 +33,20 @@ class DailyCloseQuoteTests(unittest.TestCase):
     def test_empty_frame_returns_none(self):
         self.assertIsNone(latest_daily_close_quote(_price_frame([])))
         self.assertIsNone(latest_daily_close_quote(None))
+
+    def test_live_quote_uses_prior_close_while_daily_bar_is_in_progress(self):
+        frame = _price_frame([100.0, 150.0], start="2026-10-06")
+        quote = latest_daily_close_quote(
+            frame, now=datetime(2026, 10, 7, 12, tzinfo=timezone.utc)
+        )
+        self.assertEqual(quote["price"], 100.0)
+        self.assertIn("2026-10-06", quote["as_of"])
+
+    def test_live_quote_with_only_in_progress_bar_is_unavailable(self):
+        frame = _price_frame([150.0], start="2026-10-07")
+        self.assertIsNone(latest_daily_close_quote(
+            frame, now=datetime(2026, 10, 7, 12, tzinfo=timezone.utc)
+        ))
 
 
 class ExecutionSnapshotTests(unittest.TestCase):
@@ -72,3 +87,31 @@ class ExecutionSnapshotTests(unittest.TestCase):
 
         snapshot = fetch_execution_snapshot([], boom)
         self.assertEqual(snapshot["prices"], {})
+
+    def test_live_fetch_requests_only_completed_dates_and_uses_prior_close(self):
+        frame = _price_frame([100.0, 150.0], start="2026-10-06")
+
+        def fake_load(tickers, start, end):
+            self.assertEqual(tickers, ["AAPL"])
+            self.assertIsNone(start.tzinfo)
+            self.assertEqual(end, pd.Timestamp("2026-10-06"))
+            return {"AAPL": frame}, {}
+
+        snapshot = fetch_execution_snapshot(
+            ["AAPL"], fake_load,
+            now=datetime(2026, 10, 7, 12, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot["prices"], {"AAPL": 100.0})
+
+    def test_requested_as_of_date_still_limits_ignored_loader_rows(self):
+        frame = _price_frame([100.0, 150.0], start="2026-10-06")
+
+        def fake_load(_tickers, _start, end):
+            self.assertEqual(end, pd.Timestamp("2026-10-06"))
+            return {"AAPL": frame}, {}
+
+        snapshot = fetch_execution_snapshot(
+            ["AAPL"], fake_load, as_of_date="2026-10-06",
+            now=datetime(2026, 10, 8, 12, tzinfo=timezone.utc),
+        )
+        self.assertEqual(snapshot["prices"], {"AAPL": 100.0})

@@ -46,16 +46,19 @@ def audit_price_coverage(price_data, start_date, end_date, universe=None, benchm
                 reason = "No price rows for required historical constituent/context"
             elif not isinstance(frame.index, pd.DatetimeIndex) or frame.index.has_duplicates:
                 reason = "Price index must contain unique trading timestamps"
-            elif not {"Open", "Close"}.issubset(frame.columns):
-                reason = "Open/Close prices missing"
+            elif not {"Open", "Close", "Volume"}.issubset(frame.columns):
+                reason = "Open/Close/Volume data missing"
             elif calendar.empty or calendar_problem:
                 reason = f"Benchmark trading calendar cannot be verified: {calendar_problem}"
             elif len(expected):
-                prices = frame.reindex(expected)[["Open", "Close"]]
+                # Volume-dependent strategies drop rows with missing volume.
+                # If we accepted such a row, a strategy could silently score
+                # yesterday's close while the benchmark treats today as covered.
+                prices = frame.reindex(expected)[["Open", "Close", "Volume"]]
                 numeric = prices.apply(pd.to_numeric, errors="coerce")
                 bad = (~np.isfinite(numeric) | (numeric <= 0)).any(axis=1)
                 if bad.any():
-                    reason = f"Missing/invalid Open or Close on {int(bad.sum())} benchmark sessions; first {expected[bad][0].date()}"
+                    reason = f"Missing/invalid Open, Close, or Volume on {int(bad.sum())} benchmark sessions; first {expected[bad][0].date()}"
             if reason:
                 failures.append({
                     "Ticker": ticker, "Requested Start": str(first.date()),

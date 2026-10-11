@@ -18,6 +18,10 @@ EXPORT_FILENAMES = (
     "leakage_audit.csv",
     "promotion_decision.csv",
     "benchmark_config.json",
+    "regime_path.csv",
+    "candidate_attribution.csv",
+    "position_attribution.csv",
+    "exposure_history.csv",
 )
 
 
@@ -44,7 +48,7 @@ def build_leakage_audit_table(leakage_audit):
 
 
 def build_benchmark_zip(benchmark_result):
-    """Return ZIP bytes with the 7 required benchmark export files."""
+    """Return ZIP bytes with summary, audit, and attribution artifacts."""
     buffer = io.BytesIO()
     leakage_table = build_leakage_audit_table(benchmark_result.leakage_audit)
 
@@ -69,6 +73,16 @@ def build_benchmark_zip(benchmark_result):
             "benchmark_config.json",
             json.dumps(benchmark_result.config, indent=2, default=_json_default, sort_keys=True),
         )
+        archive.writestr("regime_path.csv", benchmark_result.regime_path_table.to_csv(index=False))
+        archive.writestr(
+            "candidate_attribution.csv",
+            benchmark_result.candidate_attribution_table.to_csv(index=False),
+        )
+        archive.writestr(
+            "position_attribution.csv",
+            benchmark_result.position_attribution_table.to_csv(index=False),
+        )
+        archive.writestr("exposure_history.csv", benchmark_result.exposure_table.to_csv(index=False))
 
     buffer.seek(0)
     return buffer.getvalue()

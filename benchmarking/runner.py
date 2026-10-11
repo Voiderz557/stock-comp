@@ -33,6 +33,10 @@ from ml.models import MODEL_BUILDERS
 from strategies.registry import available_strategy_names, get_strategy
 
 from benchmarking.leakage_audit import run_leakage_audit
+from benchmarking.participation import (
+    ADAPTIVE_PARTICIPATION_METHOD_NAME,
+    AdaptiveParticipationStrategy,
+)
 from benchmarking.coverage import audit_price_coverage
 from benchmarking.metrics import build_aggregate_table, build_period_results_table, build_period_row
 from benchmarking.ml_training import (
@@ -65,6 +69,8 @@ REQUESTED_RULE_BASED_STRATEGIES = (
     "Relative Strength Momentum V1",
     "Breakout Volume V1",
     "Mean Reversion V1",
+    "Controlled Breakout V1",
+    ADAPTIVE_PARTICIPATION_METHOD_NAME,
 )
 DEFAULT_ML_MODELS = tuple(MODEL_BUILDERS)
 DEFAULT_TOP_N_VALUES = (5, 10, 20)
@@ -90,6 +96,10 @@ class BenchmarkResult:
     errors: list = field(default_factory=list)
     data_coverage: dict = field(default_factory=dict)
     config: dict = field(default_factory=dict)
+    regime_path_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    candidate_attribution_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    position_attribution_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    exposure_table: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _notify_progress(callback, event):
@@ -286,6 +296,8 @@ def run_benchmark(
     price_data=None,
     progress_callback=None,
     training_window_days=TRAINING_WINDOW_CALENDAR_DAYS,
+    exploratory_blacklist_mode=False,
+    excluded_tickers=(),
 ):
     """Run every requested method on the SAME set of historical periods.
 
@@ -298,6 +310,21 @@ def run_benchmark(
     """
     requested_start_date = pd.Timestamp(earliest_allowed).normalize()
     requested_end_date = pd.Timestamp(latest_allowed).normalize()
+    excluded_tickers = tuple(
+        sorted({str(ticker).strip().upper() for ticker in excluded_tickers if str(ticker).strip()})
+    )
+    if excluded_tickers and not exploratory_blacklist_mode:
+        raise ValueError(
+            "Ticker exclusions require explicit exploratory_blacklist_mode=True. "
+            "Normal benchmarks always retain every historical constituent."
+        )
+    if exploratory_blacklist_mode and ml_models:
+        raise ValueError(
+            "Exploratory blacklist mode is rule-based only. Disable ML models so "
+            "incomplete-universe observations cannot affect a promotion decision."
+        )
+    if benchmark.strip().upper() in excluded_tickers:
+        raise ValueError("The benchmark ticker cannot be excluded.")
 
     # Rule-based strategies (via `run_portfolio_simulation`) and ML training
     # (via `ml.dataset.build_feature_dataset`) both resolve point-in-time
@@ -318,7 +345,12 @@ def run_benchmark(
         duration, requested_start_date, requested_end_date, number_of_tests, random_seed
     )
 
-    availability = describe_availability(requested_strategies)
+    availability = [
+        (name, True)
+        if name == ADAPTIVE_PARTICIPATION_METHOD_NAME
+        else describe_availability((name,))[0]
+        for name in requested_strategies
+    ]
     available_names = [name for name, is_available in availability if is_available]
     unavailable_strategies = [name for name, is_available in availability if not is_available]
 
@@ -418,6 +450,10 @@ def run_benchmark(
 
     errors = []
     period_rows = []
+    regime_path_rows = []
+    candidate_attribution_rows = []
+    position_attribution_rows = []
+    exposure_rows = []
     trained_folds_by_model = {name: [] for name in ml_models}
     probability_log_by_model = {name: [] for name in ml_models}
 
@@ -443,6 +479,7 @@ def run_benchmark(
             top_n=top_n,
             method_name=method_name,
             universe=universe,
+            excluded_tickers=excluded_tickers if exploratory_blacklist_mode else (),
             progress_callback=_simulation_progress,
         )
         terminal_failures = unsupported_terminal_holdings(result)
@@ -453,6 +490,15 @@ def run_benchmark(
                 f"{first['Ticker']} remained held after {first['Last Public Date']}; "
                 "verified merger/delisting proceeds are not modeled"
             )
+        common = {"Test": test_number, "Method": method_name}
+        regime_path_rows.extend({**common, **row} for row in result.get("Regime Path", []))
+        candidate_attribution_rows.extend(
+            {**common, **row} for row in result.get("Candidate Attribution", [])
+        )
+        position_attribution_rows.extend(
+            {**common, **row} for row in result.get("Position Attribution", [])
+        )
+        exposure_rows.extend({**common, **row} for row in result.get("Exposure History", []))
         return result
 
     def _feature_progress(completed, total, date):
@@ -470,7 +516,12 @@ def run_benchmark(
         for strategy_name in available_names:
             progress.emit("simulation", method=strategy_name)
             try:
-                result = _simulate(get_strategy(strategy_name), period_start, period_end, strategy_name)
+                strategy = (
+                    AdaptiveParticipationStrategy()
+                    if strategy_name == ADAPTIVE_PARTICIPATION_METHOD_NAME
+                    else get_strategy(strategy_name)
+                )
+                result = _simulate(strategy, period_start, period_end, strategy_name)
                 period_rows.append(build_period_row(result, test_number))
             except Exception as error:  # noqa: BLE001 - one method's failure must not sink the run
                 errors.append(f"{strategy_name} / test {test_number}: {error}")
@@ -634,7 +685,7 @@ def run_benchmark(
                     best_existing_name,
                     ml_period_returns,
                     leakage_audit_is_valid=leakage_audit["Is Valid"],
-                    coverage_is_valid=coverage_is_valid,
+                    coverage_is_valid=coverage_is_valid and not exploratory_blacklist_mode,
                 )
             )
     promotion_table = build_promotion_table(promotion_results)
@@ -677,7 +728,19 @@ def run_benchmark(
         "ml_fold_summary": ml_fold_summary,
         "leakage_audit_is_valid": leakage_audit["Is Valid"],
         "coverage_is_valid": coverage_is_valid,
-        "benchmark_valid": leakage_audit["Is Valid"] and coverage_is_valid,
+        "benchmark_valid": (
+            leakage_audit["Is Valid"] and coverage_is_valid and not exploratory_blacklist_mode
+        ),
+        "result_classification": (
+            "NON_PROMOTABLE"
+            if exploratory_blacklist_mode
+            else ("VALID" if leakage_audit["Is Valid"] and coverage_is_valid else "INVALID")
+        ),
+        "promotion_allowed": bool(
+            leakage_audit["Is Valid"] and coverage_is_valid and not exploratory_blacklist_mode
+        ),
+        "exploratory_blacklist_mode": bool(exploratory_blacklist_mode),
+        "excluded_tickers": list(excluded_tickers),
         "unavailable_valid_constituents": data_coverage.get("Unavailable Valid Constituents", []),
         "data_source_failure_count": len(data_coverage.get("Data Source Failures") or []),
         "stage_timings": progress.timings,
@@ -699,4 +762,8 @@ def run_benchmark(
         errors=errors,
         data_coverage=data_coverage,
         config=config,
+        regime_path_table=pd.DataFrame(regime_path_rows),
+        candidate_attribution_table=pd.DataFrame(candidate_attribution_rows),
+        position_attribution_table=pd.DataFrame(position_attribution_rows),
+        exposure_table=pd.DataFrame(exposure_rows),
     )

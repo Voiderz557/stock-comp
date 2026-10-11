@@ -7,6 +7,7 @@ import queue
 import shutil
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,17 @@ LOGGER = logging.getLogger(__name__)
 PRICE_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 MANIFEST_NAME = "coverage.json"
 FAILURE_CACHE_NAME = "data_failures.json"
+LIVE_FAILURE_CACHE_NAME = "live_data_failures.json"
+LIVE_FAILURE_RETRY_SECONDS = 15 * 60
+_CACHE_LOCKS_GUARD = threading.Lock()
+_CACHE_LOCKS = {}
+
+
+def _cache_lock(cache_dir):
+    """Serialize whole loads sharing one cache in this API process."""
+    key = str(Path(cache_dir).resolve())
+    with _CACHE_LOCKS_GUARD:
+        return _CACHE_LOCKS.setdefault(key, threading.Lock())
 
 
 def _empty_price_frame():
@@ -68,6 +80,50 @@ def _resolve_cache_dir(cache_dir=None):
 def _cache_path(cache_dir, ticker):
     safe_ticker = ticker.replace("/", "-").replace("\\", "-")
     return Path(cache_dir) / f"{safe_ticker}.parquet"
+
+
+def _pickle_cache_path(parquet_path):
+    return Path(parquet_path).with_suffix(".pkl")
+
+
+def _cache_exists(parquet_path):
+    return Path(parquet_path).exists() or _pickle_cache_path(parquet_path).exists()
+
+
+def _read_cached_frame(parquet_path, ticker):
+    """Read the preferred Parquet cache, with a policy-safe pickle fallback.
+
+    Some managed Windows installations block PyArrow's native DLL.  Pickle is
+    used only for this local, generated price cache; provider files and user
+    inputs are never deserialized through this path.
+    """
+    parquet_path = Path(parquet_path)
+    pickle_path = _pickle_cache_path(parquet_path)
+    if parquet_path.exists():
+        try:
+            return _normalize_download(pd.read_parquet(parquet_path), ticker)
+        except ImportError:
+            if not pickle_path.exists():
+                raise
+    if pickle_path.exists():
+        return _normalize_download(pd.read_pickle(pickle_path), ticker)
+    return _empty_price_frame()
+
+
+def _write_cached_frame(data, parquet_path):
+    parquet_path = Path(parquet_path)
+    pickle_path = _pickle_cache_path(parquet_path)
+    try:
+        data.to_parquet(parquet_path)
+        if pickle_path.exists():
+            pickle_path.unlink()
+        return parquet_path
+    except ImportError as error:
+        LOGGER.info("Parquet cache unavailable; using local pickle cache: %s", error)
+        temporary = pickle_path.with_suffix(".pkl.tmp")
+        data.to_pickle(temporary)
+        temporary.replace(pickle_path)
+        return pickle_path
 
 
 def _merge_ranges(ranges):
@@ -160,10 +216,10 @@ def _manifest_coverage_from_rows(coverage, cached):
 def _cache_fully_covers(
     ticker, path, coverage, start, end_exclusive, required_ranges
 ):
-    if not coverage or not path.exists():
+    if not coverage or not _cache_exists(path):
         return False
     try:
-        cached = _normalize_download(pd.read_parquet(path), ticker)
+        cached = _read_cached_frame(path, ticker)
         verified = _manifest_coverage_from_rows(coverage, cached)
         if not verified:
             return False
@@ -200,8 +256,8 @@ def _write_manifest(cache_dir, manifest):
     temporary.replace(path)
 
 
-def _read_failure_cache(cache_dir):
-    path = Path(cache_dir) / FAILURE_CACHE_NAME
+def _read_failure_cache(cache_dir, filename=FAILURE_CACHE_NAME):
+    path = Path(cache_dir) / filename
     if not path.exists():
         return []
     try:
@@ -211,8 +267,8 @@ def _read_failure_cache(cache_dir):
         return []
 
 
-def _write_failure_cache(cache_dir, records):
-    path = Path(cache_dir) / FAILURE_CACHE_NAME
+def _write_failure_cache(cache_dir, records, filename=FAILURE_CACHE_NAME):
+    path = Path(cache_dir) / filename
     temporary = path.with_suffix(".tmp")
     temporary.write_text(
         json.dumps(records, indent=2, sort_keys=True), encoding="utf-8"
@@ -288,7 +344,7 @@ def _download_with_hard_timeout(ticker, start, end_exclusive):
 
 
 class LocalParquetProvider:
-    """Optional secondary provider for manually supplied historical files."""
+    """Optional secondary provider for manually supplied Parquet or CSV files."""
 
     name = "LOCAL PARQUET"
 
@@ -299,9 +355,15 @@ class LocalParquetProvider:
 
     def fetch(self, ticker, start, end_exclusive):
         path = _cache_path(self.data_dir, ticker)
-        if not path.exists():
+        csv_path = path.with_suffix(".csv")
+        if path.exists():
+            data = _normalize_download(pd.read_parquet(path), ticker)
+        elif csv_path.exists():
+            data = _normalize_download(
+                pd.read_csv(csv_path, index_col=0, parse_dates=True), ticker
+            )
+        else:
             return _empty_price_frame()
-        data = _normalize_download(pd.read_parquet(path), ticker)
         return data.loc[(data.index >= start) & (data.index < end_exclusive)]
 
 
@@ -427,17 +489,13 @@ def _load_ticker(
     requested_end = end_exclusive
     cache_error = None
     try:
-        cached = (
-            _normalize_download(pd.read_parquet(path), ticker)
-            if path.exists()
-            else _empty_price_frame()
-        )
+        cached = _read_cached_frame(path, ticker)
     except Exception as error:
         cached = _empty_price_frame()
         cache_error = f"Unreadable cache file: {error}"
     claimed_coverage = (
         manifest.get(ticker)
-        if path.exists() and cache_error is None and not cached.empty
+        if _cache_exists(path) and cache_error is None and not cached.empty
         else None
     )
     coverage = _manifest_coverage_from_rows(claimed_coverage, cached)
@@ -590,7 +648,7 @@ def _load_ticker(
         combined = pd.concat(frames).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
-        combined.to_parquet(path)
+        _write_cached_frame(combined, path)
     else:
         combined = _empty_price_frame()
 
@@ -681,12 +739,54 @@ def load_market_data(
     cache_dir=None,
     required_ranges=None,
     secondary_providers=None,
+    max_workers=1,
+    live_failure_retry=False,
 ):
-    """Load prices without conflating provider failures with membership."""
+    """Load prices without conflating provider failures with membership.
+
+    Historical callers remain sequential by default. Bounded parallel live
+    scans isolate each ticker's cache metadata, then merge it in input order;
+    no worker shares a mutable manifest or failure list with another worker.
+    """
+    if not isinstance(max_workers, int) or not 1 <= max_workers <= 8:
+        raise ValueError("max_workers must be an integer between 1 and 8.")
+    if secondary_providers is not None and max_workers > 1:
+        raise ValueError("Custom secondary providers require sequential loading.")
+    if not isinstance(live_failure_retry, bool):
+        raise ValueError("live_failure_retry must be a boolean.")
+    cache_dir = _resolve_cache_dir(cache_dir)
+    with _cache_lock(cache_dir):
+        return _load_market_data_unlocked(
+            tickers, start_date, end_date, status_callback=status_callback,
+            cache_dir=cache_dir, required_ranges=required_ranges,
+            secondary_providers=secondary_providers, max_workers=max_workers,
+            live_failure_retry=live_failure_retry,
+        )
+
+
+def _load_market_data_unlocked(
+    tickers, start_date, end_date, status_callback=None, cache_dir=None,
+    required_ranges=None, secondary_providers=None, max_workers=1,
+    live_failure_retry=False,
+):
     cache_dir = _resolve_cache_dir(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     manifest = _read_manifest(cache_dir)
-    failure_cache = _read_failure_cache(cache_dir)
+    failure_cache_name = LIVE_FAILURE_CACHE_NAME if live_failure_retry else FAILURE_CACHE_NAME
+    failure_cache = _read_failure_cache(cache_dir, failure_cache_name)
+    if live_failure_retry:
+        now = pd.Timestamp.now(tz="UTC")
+        recent = []
+        for record in failure_cache:
+            try:
+                recorded_at = pd.Timestamp(record["Timestamp"])
+                if recorded_at.tzinfo is None:
+                    recorded_at = recorded_at.tz_localize("UTC")
+                if pd.Timedelta(0) <= now - recorded_at <= pd.Timedelta(seconds=LIVE_FAILURE_RETRY_SECONDS):
+                    recent.append(record)
+            except (KeyError, TypeError, ValueError):
+                continue
+        failure_cache = recent
     start = pd.Timestamp(start_date).normalize()
     end_exclusive = pd.Timestamp(end_date).normalize() + pd.Timedelta(days=1)
     data = {}
@@ -696,40 +796,72 @@ def load_market_data(
     unique_tickers = list(dict.fromkeys(tickers))
     ticker_count = len(unique_tickers)
 
-    for index, ticker in enumerate(unique_tickers, start=1):
-        coverage = manifest.get(ticker)
-        fully_cached = _cache_fully_covers(
-            ticker,
-            _cache_path(cache_dir, ticker),
-            coverage,
-            start,
-            end_exclusive,
-            required_ranges,
-        )
-        if status_callback:
-            status_callback(
-                "USING CACHE" if fully_cached else "DOWNLOADING",
-                f"{ticker} ({index}/{ticker_count})",
+    if max_workers == 1 or ticker_count < 2:
+        for index, ticker in enumerate(unique_tickers, start=1):
+            coverage = manifest.get(ticker)
+            fully_cached = _cache_fully_covers(
+                ticker, _cache_path(cache_dir, ticker), coverage,
+                start, end_exclusive, required_ranges,
             )
-        frame, downloaded, ticker_failures, ticker_secondary = _load_ticker(
-            ticker,
-            start,
-            end_exclusive,
-            cache_dir,
-            manifest,
-            required_ranges=required_ranges,
-            secondary_providers=secondary_providers,
-            failure_cache=failure_cache,
-        )
-        data[ticker] = frame
-        failures.extend(ticker_failures)
-        secondary_sources.extend(ticker_secondary)
-        if downloaded:
-            downloaded_tickers.append(ticker)
+            if status_callback:
+                status_callback(
+                    "USING CACHE" if fully_cached else "DOWNLOADING",
+                    f"{ticker} ({index}/{ticker_count})",
+                )
+            frame, downloaded, ticker_failures, ticker_secondary = _load_ticker(
+                ticker, start, end_exclusive, cache_dir, manifest,
+                required_ranges=required_ranges,
+                secondary_providers=secondary_providers,
+                failure_cache=failure_cache,
+            )
+            data[ticker] = frame
+            failures.extend(ticker_failures)
+            secondary_sources.extend(ticker_secondary)
+            if downloaded:
+                downloaded_tickers.append(ticker)
+    else:
+        # Each ticker owns a distinct cache file. The shared JSON metadata is
+        # copied per ticker and merged only on the caller thread after futures
+        # finish, avoiding manifest/failure-cache mutations across workers.
+        def load_one(ticker):
+            own_manifest = {ticker: manifest[ticker]} if ticker in manifest else {}
+            own_failures = [dict(item) for item in failure_cache if item.get("Ticker") == ticker]
+            result = _load_ticker(
+                ticker, start, end_exclusive, cache_dir, own_manifest,
+                required_ranges=required_ranges,
+                failure_cache=own_failures,
+            )
+            return result, own_manifest, own_failures
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=min(max_workers, ticker_count)) as executor:
+            futures = {executor.submit(load_one, ticker): ticker for ticker in unique_tickers}
+            for completed, future in enumerate(as_completed(futures), start=1):
+                ticker = futures[future]
+                results[ticker] = future.result()
+                if status_callback:
+                    frame, downloaded, _, _ = results[ticker][0]
+                    status_callback(
+                        "DOWNLOADED" if downloaded else "USING CACHE",
+                        f"{ticker} ({completed}/{ticker_count})",
+                    )
+        for ticker in unique_tickers:
+            (frame, downloaded, ticker_failures, ticker_secondary), own_manifest, own_failures = results[ticker]
+            data[ticker] = frame
+            if ticker in own_manifest:
+                manifest[ticker] = own_manifest[ticker]
+            else:
+                manifest.pop(ticker, None)
+            for record in own_failures:
+                _store_failure(failure_cache, record)
+            failures.extend(ticker_failures)
+            secondary_sources.extend(ticker_secondary)
+            if downloaded:
+                downloaded_tickers.append(ticker)
 
     failures = _validate_required_coverage(data, required_ranges, failures)
     _write_manifest(cache_dir, manifest)
-    _write_failure_cache(cache_dir, failure_cache)
+    _write_failure_cache(cache_dir, failure_cache, failure_cache_name)
     unavailable = sorted({item["Ticker"] for item in failures})
     classifications = {
         ticker: {
@@ -751,6 +883,7 @@ def load_market_data(
         "Downloaded Tickers": downloaded_tickers,
         "Cache Directory": str(cache_dir),
         "Data Source Failures": failures,
+        "Failure Cache Policy": "15-minute live retry" if live_failure_retry else "persistent historical ranges",
         "Unavailable Valid Constituents": unavailable,
         "Secondary Sources Used": secondary_sources,
         "Ticker Classifications": classifications,

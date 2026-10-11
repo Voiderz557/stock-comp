@@ -1,6 +1,8 @@
 """Tests for `benchmarking.simulation`."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests.benchmark_fixtures import (
     BENCHMARK_TICKERS,
@@ -55,6 +57,8 @@ class MLRankingStrategyTests(unittest.TestCase):
         self.assertIsNotNone(result_one)
         self.assertEqual(result_one["Score"], result_two["Score"])
         self.assertEqual(result_one["Signal"], "BUY")
+        self.assertEqual(strategy_one.analyze(ticker, historical), result_one)
+        self.assertEqual(len(strategy_one.probability_log), 1)
 
     def test_ranking_order_is_deterministic_and_sorted_descending(self):
         strategy = self._strategy()
@@ -128,6 +132,24 @@ class RegimeSwitchingStrategyTests(unittest.TestCase):
         chosen_name = strategy.regime_log[-1]["Chosen Strategy"]
         for candidate in candidates:
             self.assertEqual(strategy.rank_key(candidate), get_strategy(chosen_name).rank_key(candidate))
+
+    def test_no_preferred_long_strategy_holds_cash_instead_of_falling_back(self):
+        strategy = RegimeSwitchingStrategy(
+            {"SPY": self.price_data["SPY"], "QQQ": self.price_data["QQQ"]}
+        )
+        ticker = BENCHMARK_TICKERS[0]
+        historical = self.price_data[ticker].iloc[:700]
+        no_long_recommendation = SimpleNamespace(preferred_strategies=())
+
+        with patch(
+            "benchmarking.simulation.recommend_strategy",
+            return_value=no_long_recommendation,
+        ):
+            result = strategy.analyze(ticker, historical)
+
+        self.assertEqual(result["Signal"], "WAIT")
+        self.assertEqual(result["Factor Details"]["Selected Strategy"], "CASH")
+        self.assertEqual(strategy.regime_log[-1]["Chosen Strategy"], "CASH")
 
 
 class RunPortfolioSimulationTests(unittest.TestCase):
@@ -250,6 +272,7 @@ class RunPortfolioSimulationTests(unittest.TestCase):
                 universe=list(BENCHMARK_TICKERS),
             )
             first_calls = mock_features.call_count
+            first_log = list(strategy.probability_log)
             run_portfolio_simulation(
                 strategy,
                 earliest,
@@ -260,6 +283,39 @@ class RunPortfolioSimulationTests(unittest.TestCase):
             )
             self.assertGreater(first_calls, 0)
             self.assertEqual(mock_features.call_count, first_calls)
+            self.assertTrue(first_log)
+            self.assertEqual(strategy.probability_log, first_log)
+            self.assertEqual(
+                len(first_log), len({(row["Date"], row["Ticker"]) for row in first_log})
+            )
+
+    def test_exclusions_filter_each_point_in_time_snapshot_after_resolution(self):
+        period_end = self.price_data["SPY"].index[
+            self.price_data["SPY"].index.get_indexer([self.earliest_allowed])[0] + 6
+        ]
+        observed_universes = []
+
+        def capture_candidates(*args, **kwargs):
+            observed_universes.append(tuple(kwargs["universe"]))
+            return []
+
+        with patch(
+            "benchmarking.simulation.get_historical_universe",
+            return_value=SimpleNamespace(tickers=["AAPL", "MSFT", "WBA"]),
+        ) as membership, patch(
+            "benchmarking.simulation.rank_buy_candidates", side_effect=capture_candidates
+        ):
+            run_portfolio_simulation(
+                get_strategy("Baseline"),
+                self.earliest_allowed,
+                period_end,
+                self.price_data,
+                excluded_tickers=("wba",),
+            )
+
+        self.assertGreaterEqual(membership.call_count, 1)
+        self.assertTrue(observed_universes)
+        self.assertTrue(all(items == ("AAPL", "MSFT") for items in observed_universes))
 
 
 if __name__ == "__main__":

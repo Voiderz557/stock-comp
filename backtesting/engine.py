@@ -253,6 +253,7 @@ def rank_buy_candidates(
     min_stock_price=MIN_STOCK_PRICE,
     strategy=None,
     benchmark_data=None,
+    result_callback=None,
 ):
     """Rank BUY stocks using information known before the trading day."""
     candidates = []
@@ -278,17 +279,20 @@ def rank_buy_candidates(
 
     rank_universe = getattr(strategy, "rank_universe", None)
     if callable(rank_universe):
-        candidates = [
-            result
-            for result in rank_universe(
+        ranked_results = [
+            result for result in rank_universe(
                 downloaded_data,
                 rebalance_date,
                 universe,
                 min_stock_price,
                 historical_benchmark,
             )
-            if result is not None and result["Signal"] == "BUY"
+            if result is not None
         ]
+        if result_callback:
+            for result in ranked_results:
+                result_callback(result)
+        candidates = [result for result in ranked_results if result["Signal"] == "BUY"]
         candidates.sort(key=strategy.rank_key, reverse=True)
         return candidates
 
@@ -316,6 +320,9 @@ def rank_buy_candidates(
             historical_data,
             benchmark_data=historical_benchmark,
         )
+
+        if result is not None and result_callback:
+            result_callback(result)
 
         if result is not None and result["Signal"] == "BUY":
             candidates.append(result)

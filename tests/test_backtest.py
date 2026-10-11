@@ -102,7 +102,10 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(download.call_count, 1)
             self.assertEqual(first["Status"], "DOWNLOADING")
             self.assertEqual(second["Status"], "USING CACHE")
-            self.assertTrue((Path(cache_dir) / "AAPL.parquet").exists())
+            self.assertTrue(
+                (Path(cache_dir) / "AAPL.parquet").exists()
+                or (Path(cache_dir) / "AAPL.pkl").exists()
+            )
 
     def test_partial_cache_downloads_only_prefix_and_suffix(self):
         calls = []
@@ -267,9 +270,7 @@ class CacheTests(unittest.TestCase):
             manual_dir = root / "manual"
             cache_dir = root / "cache"
             manual_dir.mkdir()
-            cache_frame("2024-01-01", "2024-01-10").to_parquet(
-                manual_dir / "EA.parquet"
-            )
+            cache_frame("2024-01-01", "2024-01-10").to_csv(manual_dir / "EA.csv")
             provider = LocalParquetProvider(manual_dir)
             with patch(
                 "data.market_data._download_range",
@@ -305,9 +306,7 @@ class CacheTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as cache_dir:
             cache_dir = Path(cache_dir)
-            cache_frame("2022-10-24", "2023-01-17").to_parquet(
-                cache_dir / "SPY.parquet"
-            )
+            cache_frame("2022-10-24", "2023-01-17").to_pickle(cache_dir / "SPY.pkl")
             (cache_dir / "coverage.json").write_text(
                 json.dumps(
                     {

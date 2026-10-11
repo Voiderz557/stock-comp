@@ -9,7 +9,7 @@ from ml.features import (
     compute_feature_row,
     truncate_to_as_of,
 )
-from strategies.registry import available_strategy_names
+from strategies.registry import ml_feature_strategy_names
 from tests.ml_fixtures import linear_frame, make_multi_asset_price_data
 
 
@@ -157,7 +157,7 @@ class StrategyFeatureTests(unittest.TestCase):
         row = compute_feature_row(
             "AAPL", hist, spy_hist, qqq_hist, include_strategy_features=True
         )
-        for name in available_strategy_names():
+        for name in ml_feature_strategy_names():
             self.assertIn(f"Strategy Score: {name}", row)
             self.assertIn(f"Strategy Signal: {name}", row)
 

@@ -13,8 +13,9 @@ Regime Switching meta-strategy below) or a fixed Top-N cutoff. This loop is
 a faithful, side-by-side copy of `run_backtest`'s own loop, parameterized
 instead of hardwired.
 
-`MLRankingStrategy` and `RegimeSwitchingStrategy` are the two non-registry
-"strategy-shaped" objects this module adds:
+`MLRankingStrategy`, `RegimeSwitchingStrategy`, and the research-only
+`AdaptiveParticipationStrategy` accepted by this loop are non-registry
+"strategy-shaped" objects:
 
 - `MLRankingStrategy` wraps an already-fitted `ml.models` pipeline so it can
   be ranked by `backtesting.engine.rank_buy_candidates` (also unmodified)
@@ -31,10 +32,15 @@ instead of hardwired.
   `market.regime` module) as of each rebalance date. It duplicates no
   strategy logic at all - it only chooses which existing strategy's
   `analyze()`/`rank_key()` to call that week.
+- `AdaptiveParticipationStrategy` lives in `benchmarking.participation` and
+  delegates stock selection to Controlled Breakout V1.  Its optional
+  `select_candidates()` hook limits deployment after point-in-time regime and
+  breadth have been calculated; registered strategies never use this hook.
 """
 
 from __future__ import annotations
 
+import json
 import numpy as np
 import pandas as pd
 
@@ -59,6 +65,7 @@ from config import (
 from data.historical_universe import get_historical_universe
 from market.regime import REQUIRED_HISTORY_DAYS as REGIME_REQUIRED_HISTORY_DAYS
 from market.regime import classify_market_regime, compute_market_features
+from market.breadth import compute_market_breadth
 from market.strategy_selector import describe_availability, recommend_strategy
 from ml.feature_cache import get_feature_cache
 from ml.features import REQUIRED_HISTORY_DAYS as ML_REQUIRED_HISTORY_DAYS
@@ -86,6 +93,7 @@ def run_portfolio_simulation(
     top_n=None,
     method_name=None,
     universe=None,
+    excluded_tickers=(),
     progress_callback=None,
 ):
     """Simulate one method's weekly-rebalanced long-only portfolio.
@@ -101,10 +109,14 @@ def run_portfolio_simulation(
     default point-in-time `data.historical_universe.get_historical_universe`
     lookup with a fixed ticker list every rebalance (handy for fast,
     deterministic tests); `None` matches `run_backtest`'s normal behavior.
+    `excluded_tickers` is an explicit research-only filter applied *after*
+    resolving that date's universe. It never changes point-in-time membership
+    history and defaults to no filtering.
     """
     start_date = pd.Timestamp(start_date)
     end_date = pd.Timestamp(end_date)
     benchmark = benchmark.strip().upper()
+    excluded = {str(ticker).strip().upper() for ticker in excluded_tickers if str(ticker).strip()}
 
     benchmark_data = get_ticker_data(downloaded_data, benchmark)
     if benchmark_data is None:
@@ -130,6 +142,9 @@ def run_portfolio_simulation(
     holdings = {}
     trades = []
     portfolio_history = []
+    regime_path = []
+    candidate_attribution = []
+    exposure_history = []
     previous_week = None
     rebalance_dates = []
     seen_week = None
@@ -151,14 +166,85 @@ def run_portfolio_simulation(
             universe_snapshot = (
                 list(universe) if universe is not None else get_historical_universe(date).tickers
             )
+            universe_snapshot = [
+                ticker
+                for ticker in universe_snapshot
+                if str(ticker).strip().upper() not in excluded
+            ]
+            spy_history = get_ticker_data(downloaded_data, "SPY", copy=False)
+            qqq_history = get_ticker_data(downloaded_data, "QQQ", copy=False)
+            regime_result = None
+            regime_row = {"Date": date, "Regime": None, "Confidence": None, "Reason": None}
+            if spy_history is not None and qqq_history is not None:
+                try:
+                    market_features = compute_market_features(
+                        spy_history.loc[spy_history.index < date],
+                        qqq_history.loc[qqq_history.index < date],
+                    )
+                    regime_result = classify_market_regime(market_features)
+                    regime_row.update(
+                        {
+                            "Regime": regime_result.regime,
+                            "Confidence": regime_result.confidence,
+                            "Reason": regime_result.reason,
+                            **{f"Market {key}": value for key, value in vars(market_features).items()},
+                        }
+                    )
+                except ValueError as error:
+                    regime_row["Reason"] = str(error)
+            breadth = compute_market_breadth(downloaded_data, universe_snapshot, date)
+            regime_row.update({f"Breadth {key}": value for key, value in breadth.to_dict().items()})
+            regime_path.append(regime_row)
+
+            observed_results = []
+
+            def _record_result(result):
+                observed_results.append(result)
+
             candidates = rank_buy_candidates(
                 downloaded_data,
                 date,
                 universe=universe_snapshot,
                 min_stock_price=min_stock_price,
                 strategy=strategy,
+                benchmark_data=spy_history,
+                result_callback=_record_result,
             )
-            selected_stocks = candidates[:top_n] if top_n else candidates
+            participation_decision = None
+            if hasattr(strategy, "select_candidates"):
+                selected_stocks, participation_decision = strategy.select_candidates(
+                    candidates,
+                    regime_result=regime_result,
+                    breadth=breadth,
+                    rebalance_date=date,
+                )
+                regime_row.update(
+                    {
+                        "Participation State": participation_decision.state,
+                        "Participation Top N": participation_decision.top_n,
+                        "Participation Valid": participation_decision.valid,
+                        "Participation Reason": participation_decision.reason,
+                    }
+                )
+            else:
+                selected_stocks = candidates[:top_n] if top_n else candidates
+            selected_tickers = {row["Ticker"] for row in selected_stocks}
+            candidate_ranks = {row["Ticker"]: rank for rank, row in enumerate(candidates, 1)}
+            for result in observed_results:
+                candidate_attribution.append(
+                    {
+                        "Date": date,
+                        "Ticker": result.get("Ticker"),
+                        "Signal": result.get("Signal"),
+                        "Score": result.get("Score"),
+                        "Rank Among BUY": candidate_ranks.get(result.get("Ticker")),
+                        "Selected": result.get("Ticker") in selected_tickers,
+                        "Reason": result.get("Reason"),
+                        "Factor Details": json.dumps(
+                            result.get("Factor Details", {}), default=str, sort_keys=True
+                        ),
+                    }
+                )
             cash = rebalance_portfolio(
                 downloaded_data,
                 date,
@@ -169,6 +255,29 @@ def run_portfolio_simulation(
                 fee_rate,
                 max_position_value=max_position_value,
                 position_limit_mode=position_limit_mode,
+            )
+            portfolio_value_after_rebalance = calculate_portfolio_value(
+                downloaded_data, date, cash, holdings
+            )
+            exposure_history.append(
+                {
+                    "Date": date,
+                    "Cash": cash,
+                    "Invested Value": portfolio_value_after_rebalance - cash,
+                    "Portfolio Value": portfolio_value_after_rebalance,
+                    "Gross Exposure": (
+                        (portfolio_value_after_rebalance - cash) / portfolio_value_after_rebalance
+                        if portfolio_value_after_rebalance
+                        else None
+                    ),
+                    "Holdings Count": len(holdings),
+                    "Participation State": (
+                        participation_decision.state if participation_decision else None
+                    ),
+                    "Participation Top N": (
+                        participation_decision.top_n if participation_decision else top_n
+                    ),
+                }
             )
             previous_week = week
 
@@ -203,6 +312,33 @@ def run_portfolio_simulation(
             }
         )
 
+    position_attribution = []
+    attribution_tickers = sorted({trade["Ticker"] for trade in trades} | set(holdings))
+    for ticker in attribution_tickers:
+        ticker_trades = [trade for trade in trades if trade["Ticker"] == ticker]
+        gross_buys = sum(
+            trade["Shares"] * trade["Price"] + trade["Fee"]
+            for trade in ticker_trades if trade["Action"] == "BUY"
+        )
+        net_sells = sum(
+            trade["Shares"] * trade["Price"] - trade["Fee"]
+            for trade in ticker_trades if trade["Action"] == "SELL"
+        )
+        final_row = next((row for row in final_holdings if row["Ticker"] == ticker), None)
+        final_market_value = (final_row or {}).get("Market Value") or 0.0
+        pnl = net_sells + final_market_value - gross_buys
+        position_attribution.append(
+            {
+                "Ticker": ticker,
+                "Gross Buy Cost": gross_buys,
+                "Net Sell Proceeds": net_sells,
+                "Final Market Value": final_market_value,
+                "Attributed P&L": pnl,
+                "Return on Gross Buys": pnl / gross_buys if gross_buys else None,
+                "Trade Count": len(ticker_trades),
+            }
+        )
+
     return {
         "Method": method_name or getattr(strategy, "name", "Unknown"),
         "Top N": top_n,
@@ -219,6 +355,10 @@ def run_portfolio_simulation(
         "Holdings": holdings,
         "Final Holdings": final_holdings,
         "Trades": trades,
+        "Regime Path": regime_path,
+        "Candidate Attribution": candidate_attribution,
+        "Position Attribution": position_attribution,
+        "Exposure History": exposure_history,
     }
 
 
@@ -228,8 +368,8 @@ class MLRankingStrategy:
     Every ticker for which point-in-time features can be computed is
     returned as a `Signal="BUY"` candidate scored by predicted probability;
     `run_portfolio_simulation`'s `top_n` argument slices the ranked list
-    down to a fixed count. `probability_log` records every
-    (date, ticker, probability) triple produced during a simulation, for
+    down to a fixed count. `probability_log` records each distinct
+    (as-of date, ticker, probability) prediction once per fitted fold, for
     later use by `benchmarking.stability` and `benchmarking.leakage_audit`.
     """
 
@@ -264,9 +404,6 @@ class MLRankingStrategy:
         cache_key = (ticker, pd.Timestamp(as_of))
         cached = self._analyze_cache.get(cache_key)
         if cached is not None:
-            self.probability_log.append(
-                {"Date": as_of, "Ticker": ticker, "Probability": cached["Score"]}
-            )
             return cached
 
         spy_full = self.benchmark_data.get("SPY")
@@ -341,9 +478,6 @@ class MLRankingStrategy:
             cache_key = (ticker, pd.Timestamp(as_of))
             cached = self._analyze_cache.get(cache_key)
             if cached is not None:
-                self.probability_log.append(
-                    {"Date": as_of, "Ticker": ticker, "Probability": cached["Score"]}
-                )
                 ready.append(cached)
                 continue
             try:
@@ -414,6 +548,7 @@ class RegimeSwitchingStrategy:
     """
 
     name = "Regime Switching"
+    CASH_DELEGATE_NAME = "CASH"
 
     def __init__(self, benchmark_data, fallback_strategy_name="Baseline"):
         self.benchmark_data = benchmark_data
@@ -445,8 +580,14 @@ class RegimeSwitchingStrategy:
                 regime_result = classify_market_regime(compute_market_features(spy_hist, qqq_hist))
                 regime_name = regime_result.regime
                 recommendation = recommend_strategy(regime_result)
-                availability = describe_availability(recommendation.preferred_strategies)
-                chosen_name = next((name for name, available in availability if available), None)
+                if recommendation.preferred_strategies:
+                    availability = describe_availability(recommendation.preferred_strategies)
+                    chosen_name = next((name for name, available in availability if available), None)
+                else:
+                    # A valid regime recommendation with no preferred long
+                    # strategy means hold cash. It is not a classification
+                    # failure and must not silently fall back to Baseline.
+                    chosen_name = self.CASH_DELEGATE_NAME
             except ValueError:
                 chosen_name = None
 
@@ -469,6 +610,17 @@ class RegimeSwitchingStrategy:
             return None
         as_of = historical_data.index[-1]
         chosen_name = self._choose_delegate(as_of)
+        if chosen_name == self.CASH_DELEGATE_NAME:
+            return {
+                "Ticker": ticker,
+                "Score": 0.0,
+                "Signal": "WAIT",
+                "Reason": "The current market regime has no preferred long strategy; hold cash.",
+                "Factor Details": {
+                    "As Of": as_of,
+                    "Selected Strategy": self.CASH_DELEGATE_NAME,
+                },
+            }
         delegate = get_strategy(chosen_name)
         preferred = getattr(delegate, "benchmark_ticker", None)
         relative_benchmark = self.benchmark_data.get(preferred) if preferred else None
@@ -482,6 +634,8 @@ class RegimeSwitchingStrategy:
         )
 
     def rank_key(self, result):
+        if self._last_chosen_name == self.CASH_DELEGATE_NAME:
+            return float(result.get("Score", 0.0))
         return get_strategy(self._last_chosen_name).rank_key(result)
 
 

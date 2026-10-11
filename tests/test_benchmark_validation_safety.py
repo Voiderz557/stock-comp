@@ -18,7 +18,7 @@ from tests.test_benchmarking_metrics import _period_row
 class BenchmarkValidationSafetyTests(unittest.TestCase):
     def setUp(self):
         dates = pd.bdate_range("2023-01-02", "2023-03-31")
-        frame = pd.DataFrame({"Open": 100.0, "Close": 100.0}, index=dates)
+        frame = pd.DataFrame({"Open": 100.0, "Close": 100.0, "Volume": 1000.0}, index=dates)
         self.prices = {ticker: frame.copy() for ticker in ("SPY", "QQQ", "AAPL")}
 
     def audit(self):
@@ -44,6 +44,12 @@ class BenchmarkValidationSafetyTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.prices["AAPL"].iloc[10, 0] = value
                 self.assertFalse(self.audit()["Coverage Is Valid"])
+
+    def test_missing_volume_cannot_validate_stale_breakout_input(self):
+        self.prices["AAPL"].loc[self.prices["AAPL"].index[-1], "Volume"] = np.nan
+        result = self.audit()
+        self.assertFalse(result["Coverage Is Valid"])
+        self.assertIn("Volume", result["Data Source Failures"][0]["Reason"])
 
     def test_membership_receives_observation_dates_only(self):
         with patch("benchmarking.coverage.get_membership_ranges", return_value={"AAPL": [(pd.Timestamp("2023-01-01"), pd.Timestamp("2023-03-31"))]}) as membership:

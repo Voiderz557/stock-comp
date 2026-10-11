@@ -151,6 +151,26 @@ with st.form("benchmark_settings"):
             )
             benchmark = st.text_input("Benchmark", value=BACKTEST_BENCHMARK)
 
+    with st.expander("Exploratory Data-Gap Mode", expanded=False):
+        exploratory_blacklist_mode = st.checkbox(
+            "Enable explicit exploratory blacklist mode",
+            value=False,
+            help=(
+                "Resolves the point-in-time universe first, then excludes only the listed "
+                "tickers. Results are always NON-PROMOTABLE and normal runs are unaffected."
+            ),
+        )
+        excluded_tickers_text = st.text_input(
+            "Excluded tickers (comma-separated)",
+            value="ANSS, ATVI, EA, SGEN, SPLK, WBA",
+            help="Ignored unless explicit exploratory blacklist mode is enabled.",
+        )
+        if exploratory_blacklist_mode:
+            st.error(
+                "Exploratory only: excluding historical constituents creates incomplete "
+                "coverage. The run and export will be NON-PROMOTABLE. Disable all ML models."
+            )
+
     run_button = st.form_submit_button(
         "Run Benchmark", type="primary", use_container_width=True
     )
@@ -159,6 +179,19 @@ if run_button:
     st.session_state.benchmark_result = None
     requested_start = pd.Timestamp(earliest_allowed)
     requested_end = pd.Timestamp(latest_allowed)
+    excluded_tickers = (
+        tuple(
+            sorted(
+                {
+                    ticker.strip().upper()
+                    for ticker in excluded_tickers_text.split(",")
+                    if ticker.strip()
+                }
+            )
+        )
+        if exploratory_blacklist_mode
+        else ()
+    )
     if requested_start >= requested_end:
         st.error("Earliest allowed date must be before latest allowed date.")
     elif universe is None and requested_start < HISTORICAL_UNIVERSE_START:
@@ -167,6 +200,13 @@ if run_button:
             f"{HISTORICAL_UNIVERSE_START.date()}, the earliest supported Nasdaq-100 "
             "membership date. Choose a later start, or use a fixed universe."
         )
+    elif exploratory_blacklist_mode and ml_models:
+        st.error(
+            "Exploratory blacklist mode is rule-based only. Clear the ML Models selection "
+            "before running it."
+        )
+    elif excluded_tickers and not exploratory_blacklist_mode:
+        st.error("Ticker exclusions require explicit exploratory blacklist mode.")
     else:
         try:
             from backtesting.periods import generate_random_periods
@@ -188,7 +228,9 @@ if run_button:
                 f"**Validation window (first period):** {eval_start.date()} → {planned_periods[0][1].date()}  \n"
                 f"**Test count:** {len(planned_periods)}  \n"
                 f"**Seed:** {int(random_seed)}  \n"
-                f"**Universe:** {'point-in-time Nasdaq-100' if universe is None else ', '.join(universe)}"
+                f"**Universe:** {'point-in-time Nasdaq-100' if universe is None else ', '.join(universe)}  \n"
+                f"**Result class:** {'NON-PROMOTABLE exploratory' if exploratory_blacklist_mode else 'STANDARD'}  \n"
+                f"**Explicit exclusions:** {', '.join(excluded_tickers) if excluded_tickers else 'None'}"
             )
             progress = st.progress(0, text="Starting benchmark...")
 
@@ -240,6 +282,8 @@ if run_button:
                 fee_rate=BACKTEST_FEE_RATE,
                 universe=universe,
                 progress_callback=_progress,
+                exploratory_blacklist_mode=exploratory_blacklist_mode,
+                excluded_tickers=excluded_tickers,
             )
             st.session_state.benchmark_result = result
             progress.progress(1.0, text="Benchmark complete.")
@@ -257,6 +301,12 @@ if result is None:
     st.stop()
 
 cfg = result.config or {}
+if cfg.get("exploratory_blacklist_mode"):
+    st.error(
+        "NON-PROMOTABLE EXPLORATORY RESULT — historical membership was preserved, then "
+        "these unavailable tickers were explicitly excluded: "
+        + (", ".join(cfg.get("excluded_tickers") or []) or "None")
+    )
 st.caption(
     f"Requested {cfg.get('earliest_allowed')} → {cfg.get('latest_allowed')} | "
     f"Effective {cfg.get('evaluation_start_date')} → {cfg.get('evaluation_end_date')} | "
@@ -282,11 +332,18 @@ unavailable_constituents = coverage.get("Unavailable Valid Constituents") or []
 if coverage.get("Coverage Is Valid", not coverage_failures):
     st.success("Required historical constituents have provider coverage for this run.")
 else:
-    st.error(
-        "Required historical price data is missing for one or more historically "
-        "valid constituents. Those tickers were kept in the universe; affected "
-        "results are not valid or promotable."
-    )
+    if cfg.get("exploratory_blacklist_mode"):
+        st.error(
+            "Required historical price data is missing. Point-in-time membership was "
+            "preserved, then only the explicitly listed tickers were excluded. Results "
+            "are survivorship-biased, invalid, and non-promotable."
+        )
+    else:
+        st.error(
+            "Required historical price data is missing for one or more historically "
+            "valid constituents. Those tickers were kept in the universe; affected "
+            "results are not valid or promotable."
+        )
     if unavailable_constituents:
         st.write(
             "**Unavailable valid constituents:** " + ", ".join(unavailable_constituents)
@@ -415,6 +472,26 @@ if result.errors:
     with st.expander(f"{len(result.errors)} Method/Period Failure(s)", expanded=False):
         st.dataframe(pd.DataFrame({"Error": result.errors}), width="stretch", hide_index=True)
 
+st.header("Regime, Breadth, and Candidate Attribution")
+st.caption(
+    "Point-in-time diagnostics only: regime and breadth use rows known before each "
+    "rebalance; candidate rows preserve the strategy's recorded signal, score, and reason."
+)
+with st.expander("Regime path and market breadth", expanded=False):
+    if result.regime_path_table.empty:
+        st.info("No regime-path observations are available.")
+    else:
+        st.dataframe(result.regime_path_table, width="stretch", hide_index=True)
+with st.expander("Candidate-level attribution", expanded=False):
+    if result.candidate_attribution_table.empty:
+        st.info("No candidate observations are available.")
+    else:
+        st.dataframe(result.candidate_attribution_table, width="stretch", hide_index=True)
+with st.expander("Position P&L attribution", expanded=False):
+    st.dataframe(result.position_attribution_table, width="stretch", hide_index=True)
+with st.expander("Cash and exposure path", expanded=False):
+    st.dataframe(result.exposure_table, width="stretch", hide_index=True)
+
 # ---------------------------------------------------------------------------
 # ML stability
 # ---------------------------------------------------------------------------
@@ -466,15 +543,30 @@ st.header("Export")
 if not result.leakage_audit.get("Is Valid", False):
     st.warning("This package is marked INVALID because the leakage audit failed.")
 if not cfg.get("coverage_is_valid", True):
+    if cfg.get("exploratory_blacklist_mode"):
+        st.warning(
+            "This package is marked NON-PROMOTABLE because required historical price "
+            "coverage is incomplete and the displayed exclusions were applied explicitly."
+        )
+    else:
+        st.warning(
+            "This package is marked INVALID because required historical price "
+            "coverage is incomplete. Delisted/historical constituents were not removed."
+        )
+if cfg.get("exploratory_blacklist_mode"):
     st.warning(
-        "This package is marked INVALID because required historical price "
-        "coverage is incomplete. Delisted/historical constituents were not removed."
+        "This export is labeled NON-PROMOTABLE because required historical constituents "
+        "were explicitly excluded for exploratory analysis."
     )
 zip_bytes = build_benchmark_zip(result)
 st.download_button(
     "Download Full Benchmark Package (ZIP)",
     data=zip_bytes,
-    file_name="ml_benchmark_results.zip",
+    file_name=(
+        "ml_benchmark_results_NON_PROMOTABLE.zip"
+        if cfg.get("exploratory_blacklist_mode")
+        else "ml_benchmark_results.zip"
+    ),
     mime="application/zip",
     type="primary",
 )

@@ -198,8 +198,9 @@ def compute_aggregate_metrics(period_rows):
         if n >= MIN_OBSERVATIONS_FOR_RATIOS and _usable_deviation(volatility)
         else np.nan
     )
-    downside = returns[returns < 0]
-    downside_deviation = float(downside.std(ddof=1)) if len(downside) > 1 else np.nan
+    # Use the same zero-target downside RMS as daily portfolio risk: every
+    # period contributes to the denominator, including non-losing periods.
+    downside_deviation = float(np.sqrt(np.mean(np.minimum(returns, 0) ** 2)))
     sortino_ratio = (
         float(average_return / downside_deviation)
         if n >= MIN_OBSERVATIONS_FOR_RATIOS and _usable_deviation(downside_deviation)

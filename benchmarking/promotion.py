@@ -25,6 +25,7 @@ PROMOTION_MIN_BEAT_SPY_RATE = 0.55
 # 3. Either match/beat the best existing strategy's P(Return >= 20%), or
 #    clearly improve risk-adjusted return (Sharpe Ratio).
 PROMOTION_COMPETITION_THRESHOLD_METRIC = "P(Return >= 20%)"
+PROMOTION_MIN_SHARPE_IMPROVEMENT = 0.10
 # 4. The ML method's single worst period must not be materially worse than
 #    the best existing strategy's single worst period (absolute tolerance).
 PROMOTION_WORST_PERIOD_TOLERANCE = 0.05
@@ -128,7 +129,9 @@ def evaluate_promotion(
     ml_sharpe = _required(ml_metrics, "Sharpe Ratio")
     best_sharpe = _required(best_existing_metrics, "Sharpe Ratio")
     risk_adjusted_clearly_improved = (
-        ml_sharpe is not None and best_sharpe is not None and ml_sharpe > best_sharpe
+        ml_sharpe is not None
+        and best_sharpe is not None
+        and ml_sharpe - best_sharpe >= PROMOTION_MIN_SHARPE_IMPROVEMENT
     )
 
     worst_ml_period = _required(ml_metrics, "Worst Period Return")

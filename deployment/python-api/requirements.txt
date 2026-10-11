@@ -1,0 +1,5 @@
+# Reuse the API requirements without adding desktop, ML, or UI dependencies.
+-r ../../requirements-web-api.txt
+pandas>=2.2,<4
+yfinance>=0.2.54,<2
+pyarrow>=19,<26

@@ -1,0 +1,26 @@
+# Preparation only. Supply values in Render's initial Blueprint setup.
+# Blueprint Path: deployment/python-api/render.yaml
+# All Docker paths below are relative to the repository root.
+services:
+  - type: web
+    name: stock-comp-python-api
+    runtime: docker
+    plan: free
+    dockerContext: .
+    dockerfilePath: deployment/python-api/Dockerfile
+    healthCheckPath: /v1/health
+    autoDeployTrigger: "off"
+    maxShutdownDelaySeconds: 170
+    envVars:
+      - key: STOCK_COMP_SUPABASE_URL
+        sync: false
+      - key: STOCK_COMP_SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: STOCK_COMP_SUPABASE_SECRET_KEY
+        sync: false
+      - key: STOCK_COMP_ALLOWED_ORIGINS
+        sync: false
+      - key: STOCK_COMP_HTTPS_ONLY
+        sync: false
+      - key: STOCK_COMP_API_DEMO_MODE
+        sync: false

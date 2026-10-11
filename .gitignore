@@ -11,6 +11,8 @@ dist/
 # Runtime/generated data - never commit, but never delete locally either.
 *.sqlite3
 *.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
 paper_trading_data/
 historical_data/
 ml_datasets/
@@ -18,3 +20,18 @@ ml_dataset_cache/
 benchmark_exports/
 *.parquet
 *.zip
+
+# Web build and local configuration.
+node_modules/
+.next/
+web/out/
+.env.local
+.env.*.local
+
+# Provider CLI state and independently managed Sites checkout.
+supabase/.temp/
+sites/
+# Hosted source is preserved in deployment/chatgpt-site; generated output is not.
+deployment/chatgpt-site/out/
+*.tsbuildinfo
+*.tar

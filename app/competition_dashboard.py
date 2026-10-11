@@ -17,7 +17,8 @@ Hard boundaries respected by this file:
 import pandas as pd
 import streamlit as st
 
-from config import MAX_POSITION_VALUE, MIN_STOCK_PRICE, STOCK_UNIVERSE
+from config import MAX_POSITION_VALUE, MIN_STOCK_PRICE
+from data.scanner_universe import expanded_current_scanner_universe
 from data.market_data import load_market_data
 from market.regime import load_current_market_regime
 from market.strategy_selector import describe_availability, recommend_strategy
@@ -41,6 +42,11 @@ from paper_trading.plan_store import (
     previous_plan,
     save_plan,
 )
+from paper_trading.market_watcher import (
+    AUTO_CHECK_INTERVAL,
+    load_watcher_history,
+    run_watcher_check,
+)
 from ai.settings import ai_ui_enabled
 from ai.ui import render_ai_analysis_section
 from paper_trading.trading_plan import (
@@ -52,7 +58,7 @@ from paper_trading.trading_plan import (
     plan_to_csv,
 )
 from strategies.registry import (
-    available_strategy_names,
+    live_strategy_names,
     extra_strategy_benchmark_tickers,
     get_strategy,
 )
@@ -73,6 +79,15 @@ SCAN_HISTORY_BUFFER_CALENDAR_DAYS = 30
 
 def _calendar_days_for_trading_days(trading_days):
     return int(trading_days * TRADING_TO_CALENDAR_DAY_MULTIPLIER) + SCAN_HISTORY_BUFFER_CALENDAR_DAYS
+
+
+def _display_dataframe(value, **kwargs):
+    """Render a table even when Windows policy prevents PyArrow from loading."""
+    try:
+        return st.dataframe(value, **kwargs)
+    except (ImportError, ModuleNotFoundError):
+        html = value.to_html() if hasattr(value, "to_html") else pd.DataFrame(value).to_html(index=False)
+        return st.markdown(html, unsafe_allow_html=True)
 
 
 st.set_page_config(page_title="Paper Trading Competition Dashboard", layout="wide")
@@ -248,6 +263,71 @@ else:
             )
         )
 
+st.subheader("Market watcher")
+st.caption(
+    "Read-only paper-account alerts from latest available daily closes. "
+    "Not a real-time feed, trade instruction, or automatic order. "
+    "Checks run only while this dashboard is open."
+)
+auto_watch = st.toggle(
+    f"Check every {AUTO_CHECK_INTERVAL} while this page is open",
+    value=False,
+    key="auto_market_watch",
+)
+
+
+@st.fragment(run_every=AUTO_CHECK_INTERVAL if auto_watch else None)
+def _render_market_watcher():
+    history = load_watcher_history()
+    manual_check = st.button("Check market changes now", key="check_market_changes")
+    last = history["last_observation"]
+    due = True
+    if last is not None:
+        try:
+            age = (
+                pd.Timestamp.now(tz="UTC") - pd.Timestamp(last["checked_at"])
+            ).total_seconds()
+            due = age >= 15 * 60
+        except (KeyError, ValueError, TypeError):
+            due = True
+    if manual_check or (auto_watch and due):
+        with st.status("Checking paper-account market changes…", expanded=False):
+            try:
+                result = run_watcher_check()
+                st.caption(
+                    f"Checked {len(result['observation']['watched_tickers'])} "
+                    f"held or saved-plan tickers; {len(result['new_alerts'])} new alerts."
+                )
+            except Exception as error:
+                st.error(f"Watcher check failed; no new observation was saved: {error}")
+        history = load_watcher_history()
+        last = history["last_observation"]
+    if last is None:
+        st.info("No watcher check yet. Click Check market changes now to establish a baseline.")
+        return
+    st.caption(
+        f"Last check: {last['checked_at']}; saved plan #{last['plan_id'] or 'none'}; "
+        f"strategy: {last['strategy_name'] or 'none'}; "
+        f"watching {len(last['watched_tickers'])} tickers. "
+        "Only held stocks and saved BUY candidates are monitored."
+    )
+    alerts = history["alerts"]
+    if not alerts:
+        st.success("No watcher alerts recorded yet.")
+    else:
+        for alert in alerts[:10]:
+            price_date = f"; close as of {alert['price_as_of']}" if alert['price_as_of'] else ""
+            label = f"{alert['checked_at']} — {alert['message']}{price_date}"
+            if alert["severity"] == "warning":
+                st.warning(label)
+            else:
+                st.info(label)
+        with st.expander(f"Alert history ({len(alerts)} most recent)"):
+            _display_dataframe(pd.DataFrame(alerts), width="stretch", hide_index=True)
+
+
+_render_market_watcher()
+
 audit = paper_storage.audit_ledger(current_prices)
 st.subheader("Ledger audit")
 audit_status = audit["Status"]
@@ -273,7 +353,7 @@ else:
     st.success("Accounting identities passed.")
 
 audit_table = pd.DataFrame(audit["Checks"])
-st.dataframe(audit_table, width="stretch", hide_index=True)
+_display_dataframe(audit_table, width="stretch", hide_index=True)
 st.caption(
     f"Accounting={audit['Accounting']}; Valuation={audit['Valuation']}; "
     f"Solvency={audit['Solvency']}. Unavailable checks are never treated as PASS."
@@ -320,7 +400,7 @@ else:
         "Price Unavailable",
     ]
     display_columns = [column for column in display_columns if column in positions_table.columns]
-    st.dataframe(
+    _display_dataframe(
         positions_table[display_columns].style.format(
             {
                 "Entry Price": "${:,.2f}",
@@ -387,7 +467,7 @@ else:
             "reason": "Reason",
         }
     )
-    st.dataframe(
+    _display_dataframe(
         closed_table.style.format(
             {
                 "Entry Price": "${:,.2f}",
@@ -459,8 +539,8 @@ if regime_result is not None:
                 {"Metric": "20D Market Volatility", "Value": f"{features.market_volatility_20d:.2%}"},
             ]
         )
-        st.dataframe(metrics_table, width="stretch", hide_index=True)
-        st.dataframe(
+        _display_dataframe(metrics_table, width="stretch", hide_index=True)
+        _display_dataframe(
             pd.DataFrame(
                 {
                     "Check": list(regime_result.supporting_metrics.keys()),
@@ -477,6 +557,7 @@ else:
 # ---------------------------------------------------------------------------
 # Today's Trading Plan (recommendation only)
 # ---------------------------------------------------------------------------
+live_universe = expanded_current_scanner_universe()
 st.header("Today's Trading Plan")
 st.caption(
     "Recommendation only: building a plan never opens or closes positions. "
@@ -515,7 +596,7 @@ if st.button("Build today's trading plan"):
             plan_mode,
             account_for_plan,
             holdings_for_plan,
-            universe=STOCK_UNIVERSE,
+            universe=live_universe,
             load_market_data_fn=load_market_data,
             status_callback=_plan_status,
         )
@@ -577,7 +658,7 @@ if plan:
                 for row in plan["buys"]
             ]
         )
-        st.dataframe(
+        _display_dataframe(
             buys_table.style.format(
                 {
                     "Latest daily close": "${:,.2f}",
@@ -593,7 +674,7 @@ if plan:
         st.info(plan.get("no_purchase_explanation") or "No purchases qualify.")
     if plan.get("skipped_buys"):
         with st.expander("Candidates not allocated", expanded=False):
-            st.dataframe(pd.DataFrame(plan["skipped_buys"]), width="stretch", hide_index=True)
+            _display_dataframe(pd.DataFrame(plan["skipped_buys"]), width="stretch", hide_index=True)
     if plan.get("unavailable_universe"):
         st.caption(
             "Unavailable universe tickers (not treated as sells): "
@@ -629,7 +710,7 @@ if plan:
                 for row in plan["holdings"]
             ]
         )
-        st.dataframe(
+        _display_dataframe(
             holdings_table.style.format({"Latest daily close": "${:,.2f}"}),
             width="stretch",
             hide_index=True,
@@ -728,7 +809,7 @@ if plan:
 # ---------------------------------------------------------------------------
 st.header("Ranked LONG Candidates")
 st.caption(
-    f"Scans the configured universe ({len(STOCK_UNIVERSE)} tickers) using every "
+    f"Scans the configured universe ({len(live_universe)} tickers) using every "
     "registered strategy's own BUY signal and ranking - no strategy logic is "
     "changed here. Candidate Price is the scan-time daily close and is "
     f"informational only. Submitting an open fetches a new {SOURCE_LABEL} "
@@ -736,7 +817,7 @@ st.caption(
 )
 
 if st.button("Scan configured universe"):
-    strategy_names = available_strategy_names()
+    strategy_names = live_strategy_names()
     max_required_history = max(
         get_strategy(name).required_history_days for name in strategy_names
     )
@@ -744,7 +825,7 @@ if st.button("Scan configured universe"):
     today = pd.Timestamp.today().normalize()
     start_date = today - pd.Timedelta(days=calendar_days)
 
-    scan_tickers = list(dict.fromkeys(list(STOCK_UNIVERSE) + extra_strategy_benchmark_tickers()))
+    scan_tickers = list(dict.fromkeys(list(live_universe) + extra_strategy_benchmark_tickers()))
     with st.spinner(f"Loading price history for {len(scan_tickers)} tickers..."):
         try:
             price_data, cache_info = load_market_data(scan_tickers, start_date, today)
@@ -753,7 +834,7 @@ if st.button("Scan configured universe"):
             st.error(f"Could not load market data for the scan: {error}")
 
     candidates_by_strategy = scan_for_candidates(
-        STOCK_UNIVERSE, strategy_names, price_data, get_strategy, min_price=MIN_STOCK_PRICE
+        live_universe, strategy_names, price_data, get_strategy, min_price=MIN_STOCK_PRICE
     )
     st.session_state["candidate_scan"] = candidates_by_strategy
     st.session_state["candidate_scan_prices"] = latest_close_prices(price_data)
@@ -784,7 +865,7 @@ else:
                 for row in rows
             ]
         )
-        st.dataframe(
+        _display_dataframe(
             candidates_table.style.format(
                 {"Score": "{:.4f}", "Scan daily close (informational)": "${:,.2f}"}
             ),
