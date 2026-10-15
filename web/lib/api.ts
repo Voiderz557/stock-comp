@@ -1,4 +1,6 @@
 import { DEMO_SNAPSHOT } from "./demo-data";
+import { runPlanJob, type PlanProgress } from "./plan-job-client";
+export type { PlanProgress } from "./plan-job-client";
 import type { PaperAction, PlanHistoryItem, PlanningProfile, PublicSnapshot, TradingViewPlanningRules } from "./types";
 
 const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "";
@@ -191,23 +193,12 @@ export async function estimateTradingViewLong(
   return (await response.json()) as TradingViewEstimate;
 }
 
-export async function buildDailyPlan(accessToken: string, strategy: string, targetPositionValue: number, minimumPrice = 5, universeMode: "EXPANDED" | "BROAD" = "EXPANDED"): Promise<PublicSnapshot> {
+export async function buildDailyPlan(accessToken: string, strategy: string, targetPositionValue: number, minimumPrice = 5, universeMode: "EXPANDED" | "BROAD" = "EXPANDED", onProgress?: (progress: PlanProgress) => void): Promise<PublicSnapshot> {
   if (!apiBase) throw new Error("The application API is not configured.");
-  const response = await fetch(`${apiBase}/v1/plans/current`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ strategy, target_position_value: targetPositionValue, minimum_price: minimumPrice, universe_mode: universeMode }),
-    signal: AbortSignal.timeout(180_000),
+  return runPlanJob({
+    baseUrl: apiBase, token: accessToken, onProgress,
+    input: { request_id: crypto.randomUUID(), strategy, target_position_value: targetPositionValue, minimum_price: minimumPrice, universe_mode: universeMode },
   });
-  if (!response.ok) {
-    let detail = "Today’s plan could not be generated.";
-    try {
-      const body = (await response.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {}
-    throw new Error(detail);
-  }
-  return (await response.json()) as PublicSnapshot;
 }
 
 export async function loadPlanHistory(accessToken: string): Promise<PlanHistoryItem[]> {

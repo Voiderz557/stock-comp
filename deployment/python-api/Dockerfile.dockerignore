@@ -21,6 +21,7 @@ api/**
 !api/cloud_repository.py
 !api/demo_data.py
 !api/plan_service.py
+!api/plan_jobs.py
 !api/planning_profiles.py
 !api/public_app.py
 !api/security.py

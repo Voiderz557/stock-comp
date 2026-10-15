@@ -25,6 +25,20 @@ function harness(handler = () => snapshot(), options = {}) {
   }, ...options });
   return { api, calls };
 }
+test("native fetch retains its global receiver in Worker runtimes", async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = function (target) {
+    assert.equal(this, globalThis);
+    calls += 1;
+    return Promise.resolve(Response.json(String(target).endsWith("/auth/v1/user") ? { id: userId } : snapshot()));
+  };
+  try {
+    const api = createApi({ strategyNames: strategies });
+    assert.equal((await api(request("snapshot"), env)).portfolio.cash, 95000);
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = original; }
+});
 test("public config never exposes a server key, localhost compute, or fake demo", () => {
   assert.equal(publicConfig({ ...env, STOCK_COMP_SUPABASE_PUBLISHABLE_KEY: "sb_secret_no" }).storage_configured, false);
   assert.equal(publicConfig({ ...env, STOCK_COMP_PYTHON_API_URL: "http://127.0.0.1:8000" }).compute_configured, false);
@@ -108,7 +122,30 @@ test("only fixed compute routes forward to HTTPS host and omit Site cookies", as
   assert.equal(result.generated, true);
   assert.equal(calls[1].url, "https://engine.onrender.com/v1/plans/current");
   assert.deepEqual(Object.keys(calls[1].headers).sort(), ["Authorization", "Content-Type"]);
-  assert.equal(calls[1].redirect, "error");
+  assert.equal(calls[1].redirect, "manual");
+});
+test("hosted fetch works when runtime rejects redirect error mode", async () => {
+  const api = createApi({ fetcher: async (target, options) => {
+    if (options.redirect === "error") throw new TypeError("Unsupported redirect mode");
+    assert.equal(options.redirect, "manual");
+    return Response.json(String(target).endsWith("/auth/v1/user") ? { id: userId } : snapshot());
+  } });
+  assert.equal((await api(request("snapshot"), env)).portfolio.cash, 95000);
+});
+test("auth, storage and compute redirects are rejected without following credentials", async () => {
+  for (const stage of ["auth", "storage", "compute"]) {
+    let calls = 0;
+    const api = createApi({ fetcher: async (target, options) => {
+      calls++;
+      assert.equal(options.redirect, "manual");
+      const auth = String(target).endsWith("/auth/v1/user");
+      return stage === "auth" || !auth
+        ? new Response(null, { status: 302, headers: { Location: "https://untrusted.example" } })
+        : Response.json({ id: userId });
+    } });
+    await assert.rejects(api(request(stage === "compute" ? "plans/current" : "snapshot", stage === "compute" ? "POST" : "GET", stage === "compute" ? {} : undefined), { ...env, STOCK_COMP_PYTHON_API_URL: "https://engine.onrender.com" }), e => e.status === 502 && e.message.includes("redirect"));
+    assert.equal(calls, stage === "auth" ? 1 : 2);
+  }
 });
 test("arbitrary paths never proxy or expose trusted plan writer", async () => {
   const { api, calls } = harness();

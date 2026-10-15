@@ -63,6 +63,7 @@ def build_cloud_plan(
     target_position_value: float = DEFAULT_TARGET_POSITION_VALUE,
     minimum_price: float = MIN_STOCK_PRICE,
     universe_mode: str = "EXPANDED",
+    status_callback=None,
 ) -> dict:
     if not math.isfinite(minimum_price) or minimum_price < 0 or minimum_price > 1_000_000:
         raise ValueError("Minimum stock price must be between $0 and $1,000,000.")
@@ -82,6 +83,7 @@ def build_cloud_plan(
         target_position_value=target_position_value,
         min_stock_price=minimum_price,
         whole_shares=True,
+        **({"status_callback": status_callback} if status_callback is not None else {}),
     )
     plan["user_minimum_price"] = minimum_price
     plan["universe_mode"] = universe_mode

@@ -33,6 +33,7 @@ from api.cloud_repository import (
     update_planning_profile,
 )
 from api.plan_service import build_cloud_plan, plan_payload
+from api.plan_jobs import PlanJobs
 from api.snapshot_visibility import visible_snapshot
 from api.account_export import export_owned_account_data
 from api.planning_profiles import (
@@ -141,6 +142,10 @@ class PlanCreateRequest(BaseModel):
         return value
 
 
+class PlanJobRequest(PlanCreateRequest):
+    request_id: UUID
+
+
 class RecommendationEventRequest(BaseModel):
     event_type: str
 
@@ -175,6 +180,8 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
     limiter = FixedWindowRateLimiter()
+    plan_jobs = PlanJobs()
+    application.state.plan_jobs = plan_jobs
     read_limit = positive_int_env("STOCK_COMP_READ_RATE_LIMIT_PER_MINUTE", 120)
     write_limit = positive_int_env("STOCK_COMP_WRITE_RATE_LIMIT_PER_MINUTE", 20)
 
@@ -356,6 +363,49 @@ def create_app() -> FastAPI:
             return await asyncio.wait_for(asyncio.to_thread(load_vix_context), timeout=20)
         except asyncio.TimeoutError as exc:
             raise HTTPException(status_code=503, detail="VIX market data timed out.") from exc
+
+    @application.post("/v1/plan-jobs", status_code=202)
+    async def start_plan_job(request: PlanJobRequest, principal: Principal = Depends(require_principal)):
+        if principal.is_demo:
+            raise HTTPException(403, "Demo access cannot generate plans.")
+        if not principal.access_token or not cloud_repository_configured() or not trusted_plan_storage_configured():
+            raise HTTPException(503, "Authenticated trusted plan storage is not configured. No scan was started.")
+        current = await load_account_snapshot(principal.access_token)
+        fingerprint = (current["account"]["portfolio_version"], request.strategy,
+                       request.target_position_value, request.minimum_price, request.universe_mode)
+
+        async def execute(progress, timeout, job):
+            worker = asyncio.create_task(asyncio.to_thread(
+                build_cloud_plan, current, request.strategy, request.target_position_value,
+                request.minimum_price, request.universe_mode, status_callback=progress,
+            ))
+            try:
+                generated = await asyncio.wait_for(asyncio.shield(worker), timeout)
+            except asyncio.TimeoutError as error:
+                from time import monotonic
+                job.status, job.stage = "FAILED", "Scan time limit reached"
+                job.error = "The market scan exceeded its safety limit. No new plan was saved. Wait for price loading to finish before retrying."
+                job.finished = monotonic()
+                # Python cannot stop a running thread. Retain the single scan
+                # slot until it exits; never let its late result reach storage.
+                await asyncio.gather(worker, return_exceptions=True)
+                raise HTTPException(504, job.error) from error
+            progress("Saving checked plan", "Rechecking the portfolio version before saving.")
+            payload = plan_payload(current, generated)
+            await save_current_trading_plan(principal.access_token, payload, user_id=principal.user_id)
+
+        job = plan_jobs.start(principal.user_id, str(request.request_id), fingerprint, execute)
+        return job.public()
+
+    @application.get("/v1/plan-jobs/{job_id}")
+    async def plan_job_status(job_id: UUID, principal: Principal = Depends(require_principal)):
+        if principal.is_demo or not principal.access_token:
+            raise HTTPException(403, "Sign in to read your scan progress.")
+        job = plan_jobs.get(principal.user_id, job_id)
+        result = job.public()
+        if job.status == "SUCCEEDED":
+            result["snapshot"] = visible_snapshot(await load_account_snapshot(principal.access_token))
+        return result
 
     @application.post("/v1/plans/current")
     async def build_plan(

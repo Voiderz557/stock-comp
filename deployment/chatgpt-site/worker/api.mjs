@@ -168,7 +168,9 @@ function profilePayload(body, strategyNames) {
   return { name, mode, rules: r };
 }
 
-export function createApi({ fetcher = fetch, strategyNames = [], now = () => Date.now() } = {}) {
+// Workers requires native fetch to retain its global receiver. Node's fetch
+// permits a detached call, so injected-fetch unit tests alone cannot catch this.
+export function createApi({ fetcher = (...args) => globalThis.fetch(...args), strategyNames = [], now = () => Date.now() } = {}) {
   const limits = new Map();
   return async function api(request, env) {
     const url = new URL(request.url);
@@ -180,8 +182,12 @@ export function createApi({ fetcher = fetch, strategyNames = [], now = () => Dat
     const authorization = request.headers.get("authorization") || "";
     if (!/^Bearer \S{1,8192}$/i.test(authorization)) throw new ApiError(401, "Sign in to access your account.");
     async function upstream(target, options = {}, timeout = 10000) {
+      let response;
       try {
-        const response = await fetcher(target, { ...options, redirect: "error", signal: AbortSignal.timeout(timeout) });
+        response = await fetcher(target, { ...options, redirect: "manual", signal: AbortSignal.timeout(timeout) });
+        // Do not follow redirects with credentials. Manual mode is supported by
+        // the hosted runtime; redirect:"error" is rejected before network I/O.
+        if (response.status >= 300 && response.status < 400) throw new ApiError(502, "Account storage returned an unexpected redirect.");
         const value = await serviceJson(response);
         if (!response.ok) {
           if (response.status === 401 || response.status === 403) throw new ApiError(401, "Your session expired or access was denied. Please sign in again.");
@@ -193,7 +199,18 @@ export function createApi({ fetcher = fetch, strategyNames = [], now = () => Dat
         }
         return value;
       } catch (error) {
-        if (error instanceof ApiError) throw error;
+        if (error instanceof ApiError) {
+          if (error.status >= 500) console.error("account_storage_upstream", { path: new URL(target).pathname, status: response?.status ?? null, reason: error.message });
+          throw error;
+        }
+        const message = error?.message || "";
+        const category = /illegal invocation|incorrect this/i.test(message) ? "INVALID_FETCH_RECEIVER"
+          : /AbortSignal|timeout.*function/i.test(message) ? "TIMEOUT_API_UNSUPPORTED"
+          : /redirect/i.test(message) ? "REDIRECT_REJECTED"
+          : /fetch.*function/i.test(message) ? "FETCH_API_UNSUPPORTED"
+          : /network|connect|dns|resolve/i.test(message) ? "NETWORK_FAILURE"
+          : error?.name || "Error";
+        console.error("account_storage_upstream", { path: new URL(target).pathname, status: response?.status ?? null, reason: category });
         if (error?.name === "TimeoutError" || error?.name === "AbortError") throw new ApiError(504, "The service timed out. Refresh account state before retrying an action.");
         throw new ApiError(502, "The service is unavailable. Refresh account state before retrying an action.");
       }
@@ -293,11 +310,14 @@ export function createApi({ fetcher = fetch, strategyNames = [], now = () => Dat
       return { schema_version: 1, exported_at: new Date(now()).toISOString(), scope: "All rows visible to the signed-in user in the listed application tables.", consistency: "Read-only sequential export; concurrent account edits may span tables. No auth-provider profile or credential is included.", tables, counts: Object.fromEntries(Object.entries(tables).map(([key, rows]) => [key, rows.length])) };
     }
     const computeRoutes = new Map([
+      ["POST /v1/plan-jobs", 55000],
       ["POST /v1/plans/current", 165000], ["POST /v1/plans/exit-guidance", 55000],
       ["POST /v1/planning-profiles/auto-plan", 55000], ["POST /v1/planning-profiles/estimate", 10000],
       ["GET /v1/market/vix", 25000],
     ]);
-    const timeout = computeRoutes.get(`${request.method} ${path}`);
+    const jobStatus = path.match(/^\/v1\/plan-jobs\/([0-9a-f-]{36})$/i);
+    const timeout = jobStatus && request.method === "GET"
+      ? (uuid(jobStatus[1]), 55000) : computeRoutes.get(`${request.method} ${path}`);
     if (timeout) {
       if (!config.compute_configured) throw new ApiError(503, config.compute_message);
       const target = `${httpsOrigin(env.STOCK_COMP_PYTHON_API_URL, "Strategy service")}${path}`;
@@ -306,13 +326,18 @@ export function createApi({ fetcher = fetch, strategyNames = [], now = () => Dat
       // browser Origin, service-role key, or arbitrary destination is forwarded.
       let response, value;
       try {
-        response = await fetcher(target, { method: request.method, headers: { Authorization: authorization, "Content-Type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(timeout) });
+        response = await fetcher(target, { method: request.method, headers: { Authorization: authorization, "Content-Type": "application/json" }, body, redirect: "manual", signal: AbortSignal.timeout(timeout) });
+        if (response.status >= 300 && response.status < 400) throw new ApiError(502, "The strategy service returned an unexpected redirect.");
         value = await serviceJson(response);
       } catch (error) {
         if (error instanceof ApiError) throw error;
         throw new ApiError(error?.name === "TimeoutError" || error?.name === "AbortError" ? 504 : 502, "The strategy service could not be reached. It may be starting on the free host. No result was confirmed; refresh before retrying.");
       }
-      if (!response.ok) throw new ApiError([401, 403, 409, 422, 429, 503, 504].includes(response.status) ? response.status : 502, typeof value?.detail === "string" ? value.detail.slice(0, 600) : "The strategy service is unavailable.");
+      if (!response.ok) {
+        if (response.status >= 500) console.error("strategy_service_upstream", { path, status: response.status });
+        if (response.status === 524) throw new ApiError(504, "The hosting proxy timed out before the scan responded. Refresh saved plans before retrying; no result was confirmed.");
+        throw new ApiError([401, 403, 409, 422, 429, 503, 504].includes(response.status) ? response.status : 502, typeof value?.detail === "string" ? value.detail.slice(0, 600) : "The strategy service is unavailable.");
+      }
       return value;
     }
     throw new ApiError(404, "This application endpoint is unavailable.");

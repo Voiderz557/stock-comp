@@ -32,7 +32,7 @@ import { LegalLinks } from "@/components/legal-links";
 import { GoogleSignIn } from "@/components/google-sign-in";
 import { AccountEditor } from "@/components/account-editor";
 import { AccountNotFoundError, buildDailyPlan, changeRecommendationStatus, createAccount, loadAccountArchive, loadPaperActions, loadPlanHistory, loadPlanningProfiles, loadSnapshot, loadStrategies, loadTradingViewAutoPlan, loadVixContext, demoMode, recordPaperAction, savePlanningProfile, updateAccount } from "@/lib/api";
-import type { AccountUpdate, PlanningProfileInput, TradingViewAutoPlan, VixContext } from "@/lib/api";
+import type { AccountUpdate, PlanningProfileInput, TradingViewAutoPlan, VixContext, PlanProgress } from "@/lib/api";
 import { DEFAULT_COMPETITION_PROFILE, effectiveMinimumPrice, managedAppSettingsProfile, resolvePlanningSettings, savedAppSettingsProfile } from "@/lib/planning-settings";
 import { DEMO_SNAPSHOT } from "@/lib/demo-data";
 import { compareSavedPlans } from "@/lib/plan-comparison";
@@ -316,6 +316,7 @@ function AppShell({
   settingsLoaded,
   onSaveSettings,
   settingsError,
+  scanProgress,
   onStopPreview,
 }: {
   onSignOut: () => void;
@@ -337,6 +338,7 @@ function AppShell({
   settingsLoaded: boolean;
   onSaveSettings: (rules: CompetitionPlanningRules) => Promise<void>;
   settingsError: string | null;
+  scanProgress?: PlanProgress | null;
   onStopPreview: (input: { ticker: string; available_cash: number; account_equity: number }) => Promise<TradingViewAutoPlan>;
 }) {
   const [active, setActive] = useState("Overview");
@@ -710,7 +712,7 @@ function AppShell({
                 <div><span className="section-kicker">Recommendation only</span><h2>{hasPlan ? "Rebuild today’s plan" : "Build your first daily plan"}</h2><p>Consensus checks every live-enabled strategy; individual strategies remain selectable. Set a per-stock target to spread capital across more names when enough qualify. Shares use the last dated close, not a live fill. Nothing trades automatically.</p></div>
                 <div className="plan-builder-controls"><div className="plan-settings-summary"><strong>{planStrategy}</strong><span>{universeMode === "BROAD" ? "Broad cross-sector" : "Expanded"} watchlist · {money(targetPositionValue)} per stock · {minimumPriceMode === "ANY" ? "Any eligible price ($5+)" : `Minimum $${minimumPrice}`} · {stopLossEnabled ? "Stop guide on" : "Stop guide off"}</span><button className="text-button" type="button" onClick={() => setActive("Settings")}>Adjust settings</button></div><button className="primary-button" disabled={buildingPlan || !accountReady || strategies.length === 0} onClick={() => void generatePlan()}>{buildingPlan ? "Scanning market…" : hasPlan ? "Rebuild plan" : "Build plan"}</button></div>
                 {universeMode === "BROAD" && <p role="note">Broad mode uses a larger watchlist. A cold scan may take a minute or longer; if it reaches the server’s safety limit, no new plan is saved. Refresh account state before retrying after a timeout.</p>}
-                {buildingPlan && <div className="plan-progress" role="status"><i /><span>Scanning the {universeMode === "BROAD" ? "broad" : "expanded"} watchlist: loading dated prices, detecting the regime, and ranking candidates. This request does not stream per-symbol progress; keep this page open.</span></div>}
+                {buildingPlan && <div className="plan-progress" role="status"><i /><span>{scanProgress ? `${scanProgress.stage} · ${scanProgress.detail} · ${Math.round(scanProgress.elapsed_seconds)}s elapsed` : "Starting the market scan…"} Progress refreshes automatically. Keep this page open; no trade is placed.</span></div>}
                 {planError && <p className="auth-error" role="alert">{planError}</p>}
               </section>}
               <section className="plan-banner full-plan-banner">
@@ -892,6 +894,7 @@ export default function Home() {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [vix, setVix] = useState<VixContext | null>(null);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [scanProgress, setScanProgress] = useState<PlanProgress | null>(null);
   const sessionGeneration = useRef(0);
   const renderedGeneration = sessionGeneration.current;
 
@@ -903,6 +906,7 @@ export default function Home() {
   }
 
   function clearAccountState() {
+    setScanProgress(null);
     setSnapshot(DEMO_SNAPSHOT);
     setVix(null);
     setStrategies([]);
@@ -1092,7 +1096,9 @@ export default function Home() {
   async function generateDailyPlan(strategy: string, targetPositionValue: number, minimumPrice: number, universeMode: "EXPANDED" | "BROAD") {
     const token = currentToken();
     const generation = sessionGeneration.current;
-    const updated = await buildDailyPlan(token, strategy, targetPositionValue, minimumPrice, universeMode);
+    setScanProgress(null);
+    const updated = await buildDailyPlan(token, strategy, targetPositionValue, minimumPrice, universeMode,
+      (progress) => { if (generation === sessionGeneration.current) setScanProgress(progress); });
     if (generation !== sessionGeneration.current) return;
     setSnapshot(updated);
     void loadPlanHistory(token).then((items) => { if (generation === sessionGeneration.current) { setHistory(items); setHistoryError(null); } }).catch((error) => { if (generation === sessionGeneration.current) { setHistory([]); setHistoryError(error instanceof Error ? error.message : "Plan history is unavailable."); } });
@@ -1147,7 +1153,7 @@ export default function Home() {
     onBuildPlan={generateDailyPlan} onRecommendationEvent={saveRecommendationEvent} onExportAccount={exportAccount} onRecordPaperAction={savePaperAction}
     strategies={strategies} history={history} historyError={historyError}
     paperActions={paperActions} paperActionsAvailable={paperActionsAvailable} paperActionsError={paperActionsError}
-    snapshot={snapshot} source={accessMode === "demo" ? "demo" : "api"} vix={vix}
+    snapshot={snapshot} source={accessMode === "demo" ? "demo" : "api"} vix={vix} scanProgress={scanProgress}
     savedSettings={savedSettings} settingsLoaded={settingsLoaded} onSaveSettings={saveSettings} settingsError={profileError}
     onStopPreview={(input) => loadTradingViewAutoPlan(currentToken(), input)}
   />;
