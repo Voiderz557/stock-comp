@@ -20,6 +20,7 @@ from api.auth import Principal, require_principal
 from api.cloud_repository import (
     cloud_repository_configured,
     trusted_plan_storage_configured,
+    validate_trusted_plan_storage_configuration,
     create_competition_account,
     load_account_snapshot,
     update_competition_account_snapshot,
@@ -370,6 +371,7 @@ def create_app() -> FastAPI:
             raise HTTPException(403, "Demo access cannot generate plans.")
         if not principal.access_token or not cloud_repository_configured() or not trusted_plan_storage_configured():
             raise HTTPException(503, "Authenticated trusted plan storage is not configured. No scan was started.")
+        validate_trusted_plan_storage_configuration()
         current = await load_account_snapshot(principal.access_token)
         fingerprint = (current["account"]["portfolio_version"], request.strategy,
                        request.target_position_value, request.minimum_price, request.universe_mode)
@@ -418,6 +420,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authenticated account storage is not configured yet.")
         if not trusted_plan_storage_configured():
             raise HTTPException(status_code=503, detail="Trusted plan storage is not configured on the server. No plan was generated or saved.")
+        validate_trusted_plan_storage_configuration()
         current = await load_account_snapshot(principal.access_token)
         try:
             generated = await asyncio.wait_for(asyncio.to_thread(

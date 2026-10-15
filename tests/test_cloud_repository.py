@@ -230,6 +230,31 @@ def test_plan_writer_fails_closed_without_backend_credential(monkeypatch):
     assert error.value.status_code == 503
 
 
+@pytest.mark.parametrize("credential", ["invalid-private-value", "sb_secret_bad\nheader"])
+def test_storage_preflight_rejects_bad_format_without_network_or_secret_output(monkeypatch, credential):
+    monkeypatch.setenv("STOCK_COMP_SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("STOCK_COMP_SUPABASE_SECRET_KEY", credential)
+    monkeypatch.setattr(cloud_repository.httpx, "AsyncClient", lambda **kw: pytest.fail("No network in preflight"))
+    with pytest.raises(HTTPException) as error:
+        cloud_repository.validate_trusted_plan_storage_configuration()
+    assert error.value.status_code == 503
+    assert credential not in error.value.detail
+
+
+def test_storage_preflight_preserves_explicit_legacy_headers(monkeypatch):
+    monkeypatch.setenv("STOCK_COMP_SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.delenv("STOCK_COMP_SUPABASE_SECRET_KEY", raising=False)
+    monkeypatch.setenv("STOCK_COMP_SUPABASE_SERVICE_ROLE_KEY", "legacy-test-jwt")
+    capture = {}
+    monkeypatch.setattr(cloud_repository.httpx, "AsyncClient", lambda **kw: _FakeAsyncClient(
+        _FakeResponse("22222222-2222-2222-2222-222222222222"), capture, **kw,
+    ))
+    cloud_repository.validate_trusted_plan_storage_configuration()
+    asyncio.run(cloud_repository._call_trusted_plan_writer({}))
+    assert capture["headers"]["apikey"] == "legacy-test-jwt"
+    assert capture["headers"]["Authorization"] == "Bearer legacy-test-jwt"
+
+
 def test_recommendation_status_event_uses_user_token_and_reload(monkeypatch):
     from uuid import UUID
     monkeypatch.setenv("STOCK_COMP_SUPABASE_URL", "https://example.supabase.co")

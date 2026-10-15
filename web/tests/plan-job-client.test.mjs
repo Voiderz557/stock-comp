@@ -44,8 +44,13 @@ for (const status of [401, 404, 409, 429]) test(`HTTP ${status} stops without an
 });
 test("failed, malformed and missing-result jobs are never presented as success", async () => {
   await assert.rejects(harness([{ ...running, status: "FAILED", error: "Missing benchmark history" }]).run(), /Missing benchmark/);
-  await assert.rejects(harness([{ ...running, status: "SUCCEEDED" }]).run(), /could not be reloaded/);
+  await assert.rejects(harness([{ ...running, status: "SUCCEEDED" }, { ...running, status: "SUCCEEDED" }]).run(), /could not be reloaded/);
   await assert.rejects(harness([{ nonsense: true }, { nonsense: true }]).run(), /invalid progress/);
+});
+test("a lost-start retry that finds a completed job reloads its saved snapshot", async () => {
+  const h = harness([new TypeError("lost response"), { ...running, status: "SUCCEEDED" }, { ...running, status: "SUCCEEDED", snapshot }]);
+  assert.deepEqual(await h.run(), snapshot);
+  assert.equal(h.calls[2].url, `/api/v1/plan-jobs/${id}`);
 });
 test("overall waiting deadline never silently submits a second scan", async () => {
   let time = 0;

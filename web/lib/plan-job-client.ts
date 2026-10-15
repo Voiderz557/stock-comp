@@ -46,6 +46,11 @@ export async function runPlanJob({ baseUrl, token, input, onProgress, fetcher = 
     await pause(2000);
     progress = await request("/v1/plan-jobs", input);
   }
+  // A retried start may find a job that has already saved its plan. Only the
+  // owner-authenticated status read reloads the final account snapshot.
+  if (progress.status === "SUCCEEDED" && !progress.snapshot) {
+    progress = await request(`/v1/plan-jobs/${progress.id}`);
+  }
   let transportFailures = 0;
   while (true) {
     onProgress?.(progress);

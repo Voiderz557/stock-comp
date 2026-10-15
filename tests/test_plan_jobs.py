@@ -158,6 +158,25 @@ def test_jobs_require_authentication_and_trusted_storage_before_build(monkeypatc
         assert not saved
 
 
+@pytest.mark.parametrize("endpoint", ["/v1/plan-jobs", "/v1/plans/current"])
+def test_invalid_storage_credential_rejected_before_account_load_or_scan(monkeypatch, endpoint):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid storage configuration must fail before I/O")
+    app, saved = fixture_app(monkeypatch, forbidden)
+    monkeypatch.setenv("STOCK_COMP_SUPABASE_SECRET_KEY", "private-invalid-key")
+    monkeypatch.setattr("api.public_app.load_account_snapshot", forbidden)
+    request = body()
+    if endpoint == "/v1/plans/current":
+        request.pop("request_id")
+    with TestClient(app) as client:
+        response = client.post(endpoint, json=request)
+    assert response.status_code == 503
+    assert "invalid format" in response.json()["detail"]
+    assert "STOCK_COMP_SUPABASE_SERVICE_ROLE_KEY" in response.json()["detail"]
+    assert "private-invalid-key" not in response.text
+    assert not saved
+
+
 def test_background_job_runs_real_consensus_builder_with_dated_prices(monkeypatch):
     import numpy as np
     import pandas as pd

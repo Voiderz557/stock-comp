@@ -29,6 +29,38 @@ def trusted_plan_storage_configured() -> bool:
     )
 
 
+def validate_trusted_plan_storage_configuration() -> None:
+    """Check local configuration before scanning; never fetch or log credentials.
+
+    This checks shape only, not whether Supabase accepts the credential. The
+    authenticated, version-checked writer remains the authority for saving.
+    """
+    _trusted_plan_writer_headers()
+
+
+def _trusted_plan_writer_headers() -> dict[str, str]:
+    supabase_url = (os.getenv("STOCK_COMP_SUPABASE_URL") or "").strip()
+    secret_key = (os.getenv("STOCK_COMP_SUPABASE_SECRET_KEY") or "").strip()
+    legacy_key = (os.getenv("STOCK_COMP_SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    if not supabase_url or not (secret_key or legacy_key):
+        raise HTTPException(status_code=503, detail="Trusted plan storage is not configured on the server.")
+    if secret_key and not secret_key.startswith("sb_secret_"):
+        raise HTTPException(status_code=503, detail=(
+            "The server's Supabase secret key has an invalid format. "
+            "The server administrator must configure STOCK_COMP_SUPABASE_SECRET_KEY "
+            "with a Supabase secret key, or put a legacy service_role key in "
+            "STOCK_COMP_SUPABASE_SERVICE_ROLE_KEY instead. Never share keys in chat."
+        ))
+    if any(character.isspace() for character in (secret_key or legacy_key)):
+        raise HTTPException(status_code=503, detail="The server's trusted storage credential contains invalid whitespace.")
+    # New sb_secret_* keys are not JWTs: only the apikey header is used.
+    # Preserve the existing explicit legacy-key path and Supabase validation.
+    headers = {"apikey": secret_key or legacy_key, "Content-Type": "application/json"}
+    if not secret_key:
+        headers["Authorization"] = f"Bearer {legacy_key}"
+    return headers
+
+
 async def load_account_snapshot(access_token: str, account_id: UUID | None = None) -> dict:
     return await _call_rpc(
         access_token,
@@ -114,17 +146,7 @@ async def save_current_trading_plan(access_token: str, payload: dict, *, user_id
 
 async def _call_trusted_plan_writer(body: dict) -> None:
     supabase_url = (os.getenv("STOCK_COMP_SUPABASE_URL") or "").strip().rstrip("/")
-    secret_key = (os.getenv("STOCK_COMP_SUPABASE_SECRET_KEY") or "").strip()
-    legacy_key = (os.getenv("STOCK_COMP_SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-    if not supabase_url or not (secret_key or legacy_key):
-        raise HTTPException(status_code=503, detail="Trusted plan storage is not configured on the server.")
-    if secret_key and not secret_key.startswith("sb_secret_"):
-        raise HTTPException(status_code=503, detail="The server's Supabase secret key has an invalid format.")
-    # New sb_secret_* keys are not JWTs: Supabase requires only the apikey
-    # header. Legacy service_role JWT keys also use Authorization: Bearer.
-    headers = {"apikey": secret_key or legacy_key, "Content-Type": "application/json"}
-    if not secret_key:
-        headers["Authorization"] = f"Bearer {legacy_key}"
+    headers = _trusted_plan_writer_headers()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             response = await client.post(
