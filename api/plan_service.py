@@ -117,6 +117,16 @@ def plan_payload(snapshot: dict, plan: dict) -> dict:
         for issue in coverage.get("issues") or []:
             warnings.append(f"Scan audit {issue['ticker']}: {'; '.join(issue['reasons'])}.")
     seen: set[str] = set()
+    # One persisted recommendation per ticker is required by the existing
+    # action writer. Preserve the separate holding review when a held ticker
+    # also qualifies for an additional BUY instead of dropping that evidence.
+    holding_reviews = {
+        str(row.get("Ticker") or row.get("ticker") or "").upper(): {
+            "Action": row.get("Action"), "Signal": row.get("Signal"),
+            "Reason": row.get("Reason"), "Score": row.get("Score"),
+        }
+        for row in plan.get("holdings") or []
+    }
 
     def add(row: dict, action: str, signal: str) -> None:
         ticker = str(row.get("Ticker") or row.get("ticker") or "").upper()
@@ -137,6 +147,7 @@ def plan_payload(snapshot: dict, plan: dict) -> dict:
                 "reason": str(row.get("Reason") or "No explanation was supplied."),
                 "factor_details": _json_safe({
                     **(row.get("Factor Details") or {}),
+                    **({"Holding Review": holding_reviews[ticker]} if ticker in holding_reviews else {}),
                     **({"Proposed Allocation": row["Allocation"]} if row.get("Allocation") is not None else {}),
                     **({"Proposed Quantity": row["Quantity"]} if row.get("Quantity") is not None else {}),
                     **({"Research Only — Below $5": True} if action == "BUY" and _optional_float(row.get("Price")) is not None and float(row["Price"]) < MIN_STOCK_PRICE else {}),
