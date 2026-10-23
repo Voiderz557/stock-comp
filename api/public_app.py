@@ -37,6 +37,8 @@ from api.plan_service import build_cloud_plan, plan_payload
 from api.plan_jobs import PlanJobs
 from api.snapshot_visibility import visible_snapshot
 from api.account_export import export_owned_account_data
+from api.external_research import get_external_research
+from api.journal_service import load_journal
 from api.planning_profiles import (
     PlanningProfileWrite,
     PlanningProfileUpdate,
@@ -62,6 +64,7 @@ from api.security import (
 # request timeout. A timed-out build may finish populating price cache, but
 # this coroutine must never save a plan after the client has given up.
 LIVE_PLAN_BUILD_TIMEOUT_SECONDS = 150
+RESEARCH_REQUEST_TIMEOUT_SECONDS = 10
 
 
 def _allowed_origins() -> list[str]:
@@ -356,6 +359,36 @@ def create_app() -> FastAPI:
         if abs(result["entry_price"] - saved_price) / saved_price > 0.005:
             raise HTTPException(status_code=409, detail="Candidate and sizing prices disagree. Rebuild the plan.")
         return result
+
+    @application.get("/v1/research/company/{ticker}")
+    async def company_research(
+        ticker: str,
+        principal: Principal = Depends(require_principal),
+    ) -> dict:
+        """Read-only provider metadata; credentials never reach the provider."""
+        if principal.is_demo:
+            raise HTTPException(status_code=403, detail="Sign in to load company research.")
+        if not principal.access_token:
+            raise HTTPException(status_code=401, detail="Sign in to load company research.")
+        try:
+            return await asyncio.wait_for(
+                get_external_research(ticker), timeout=RESEARCH_REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(status_code=503, detail="Company research timed out.") from exc
+
+    @application.get("/v1/recommendation-journal")
+    async def recommendation_journal(
+        principal: Principal = Depends(require_principal),
+    ) -> dict:
+        """Explicit refresh of caller-owned history with bounded cached prices."""
+        if principal.is_demo:
+            raise HTTPException(status_code=403, detail="Sign in to load your recommendation journal.")
+        if not principal.access_token:
+            raise HTTPException(status_code=401, detail="Sign in to load your recommendation journal.")
+        if not cloud_repository_configured():
+            raise HTTPException(status_code=503, detail="Authenticated account storage is not configured yet.")
+        return await load_journal(await load_plan_history(principal.access_token))
 
     @application.get("/v1/market/vix")
     async def vix_context(principal: Principal = Depends(require_principal)) -> dict:

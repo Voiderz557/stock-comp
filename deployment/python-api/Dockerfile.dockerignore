@@ -20,6 +20,9 @@ api/**
 !api/auth.py
 !api/cloud_repository.py
 !api/demo_data.py
+!api/external_research.py
+!api/recommendation_journal.py
+!api/journal_service.py
 !api/plan_service.py
 !api/plan_jobs.py
 !api/planning_profiles.py
