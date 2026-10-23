@@ -116,13 +116,14 @@ export function HostedBootstrap({ children }: Readonly<{ children: ReactNode }>)
   if (state.status !== "ready") {
     return (
       <main className="callback-shell">
-        <section className="callback-card">
+        <section className="callback-card account-loading">
+          <div className="logo"><span className="logo-mark" aria-hidden="true">S</span><span><strong>Stock</strong> Competition</span></div>
           {state.status === "loading" ? (
-            <p role="status">Connecting to your saved accounts…</p>
+            <><span className="auth-loading-ring auth-spinner" aria-hidden="true" /><h1>Welcome to your workspace</h1><p role="status">Connecting to your saved accounts…</p></>
           ) : (
             <>
               <p role="alert">The site configuration or account storage is unavailable. Please retry.</p>
-              <button type="button" onClick={() => {
+              <button className="primary-button full" type="button" onClick={() => {
                 setState({ status: "loading" });
                 setAttempt((value) => value + 1);
               }}>Retry</button>

@@ -314,10 +314,13 @@ export function createApi({ fetcher = (...args) => globalThis.fetch(...args), st
       ["POST /v1/plans/current", 165000], ["POST /v1/plans/exit-guidance", 55000],
       ["POST /v1/planning-profiles/auto-plan", 55000], ["POST /v1/planning-profiles/estimate", 10000],
       ["GET /v1/market/vix", 25000],
+      ["GET /v1/recommendation-journal", 55000],
     ]);
+    const companyResearch = /^\/v1\/research\/company\/[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,4})?$/.test(path);
     const jobStatus = path.match(/^\/v1\/plan-jobs\/([0-9a-f-]{36})$/i);
     const timeout = jobStatus && request.method === "GET"
-      ? (uuid(jobStatus[1]), 55000) : computeRoutes.get(`${request.method} ${path}`);
+      ? (uuid(jobStatus[1]), 55000) : companyResearch && request.method === "GET"
+        ? 25000 : computeRoutes.get(`${request.method} ${path}`);
     if (timeout) {
       if (!config.compute_configured) throw new ApiError(503, config.compute_message);
       const target = `${httpsOrigin(env.STOCK_COMP_PYTHON_API_URL, "Strategy service")}${path}`;

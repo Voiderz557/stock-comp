@@ -1,4 +1,5 @@
 import { DEMO_SNAPSHOT } from "./demo-data";
+import type { ExternalResearch } from "../components/company-research";
 import { runPlanJob, type PlanProgress } from "./plan-job-client";
 export type { PlanProgress } from "./plan-job-client";
 import type { PaperAction, PlanHistoryItem, PlanningProfile, PublicSnapshot, TradingViewPlanningRules } from "./types";
@@ -7,6 +8,88 @@ const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "";
 export const demoMode = (process.env.NEXT_PUBLIC_DEMO_MODE ?? "true").toLowerCase() === "true";
 
 export class AccountNotFoundError extends Error {}
+
+export type RecommendationJournalOutcome = {
+  sessions: number;
+  end_date: string | null;
+  stock_return: number | null;
+  spy_return: number | null;
+  excess_return: number | null;
+  stock_null_reason: string | null;
+  spy_null_reason: string | null;
+  null_reason: string | null;
+  status: "complete" | "maturing" | "unavailable";
+};
+
+export type RecommendationJournalResponse = {
+  asof: string;
+  price_load_status?: "loaded" | "partial" | "busy" | "timed_out" | "unavailable" | "not_needed";
+  warnings?: string[];
+  source_history: unknown[];
+  entries: {
+    plan_id: string | null;
+    recommendation_index: number;
+    strategy: string | null;
+    plan_status: string | null;
+    generated_at: string | null;
+    market_as_of: string | null;
+    ticker: string;
+    status: string | null;
+    action: string | null;
+    recommendation: Record<string, unknown>;
+    signal_date: string | null;
+    reference_date: string | null;
+    outcomes: RecommendationJournalOutcome[];
+  }[];
+  needed_symbols: string[];
+  deferred_symbols: string[];
+  fetch_request: { tickers: string[]; start_date: string; end_date: string } | null;
+  methodology: {
+    kind: string; return_units: "fraction"; price_basis: string;
+    reference: string; signal_date_return: string; execution: string;
+    calendar_source: string; calendar_years: number[]; coverage: string; bias_warning: string;
+  };
+};
+
+async function loadAuthenticatedResearch(path: string, accessToken: string): Promise<unknown> {
+  if (!accessToken?.trim()) throw new Error("Sign in to load research.");
+  if (!apiBase) throw new Error("The application API is not configured.");
+  const response = await fetch(`${apiBase}/v1/${path}`, {
+    method: "GET", headers: { Authorization: `Bearer ${accessToken}` },
+    cache: "no-store", redirect: "error", signal: AbortSignal.timeout(60_000),
+  });
+  if (!response.ok) throw new Error(response.status === 401
+    ? "Your session expired. Please sign in again." : "Research is unavailable. Please try again later.");
+  return response.json();
+}
+
+export async function loadCompanyResearch(accessToken: string, ticker: string): Promise<ExternalResearch> {
+  const symbol = ticker.trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,4})?$/.test(symbol)) throw new Error("Enter a valid stock ticker.");
+  return await loadAuthenticatedResearch(`research/company/${encodeURIComponent(symbol)}`, accessToken) as ExternalResearch;
+}
+
+export async function loadRecommendationJournal(accessToken: string): Promise<RecommendationJournalResponse> {
+  const value = await loadAuthenticatedResearch("recommendation-journal", accessToken) as RecommendationJournalResponse;
+  // Reject malformed or incompatible results rather than inventing zero returns.
+  if (!value || typeof value.asof !== "string" || !Array.isArray(value.source_history) ||
+      (value.price_load_status !== undefined && !["loaded", "partial", "busy", "timed_out", "unavailable", "not_needed"].includes(value.price_load_status)) ||
+      (value.warnings !== undefined && (!Array.isArray(value.warnings) || !value.warnings.every(warning => typeof warning === "string"))) ||
+      !Array.isArray(value.entries) || !Array.isArray(value.needed_symbols) || !Array.isArray(value.deferred_symbols) ||
+      value.methodology?.return_units !== "fraction" || value.methodology.kind !== "post_publication_close_research_return" ||
+      value.methodology.price_basis !== "loader_adjusted_close" ||
+      !value.entries.every(entry => entry && typeof entry.ticker === "string" && Array.isArray(entry.outcomes) &&
+        [entry.strategy, entry.plan_status, entry.generated_at, entry.market_as_of, entry.status, entry.action, entry.signal_date, entry.reference_date]
+          .every(field => field == null || typeof field === "string") &&
+        entry.outcomes.every(outcome => outcome && [5, 20, 60].includes(outcome.sessions) &&
+          ["complete", "maturing", "unavailable"].includes(outcome.status) &&
+          [outcome.end_date, outcome.stock_null_reason, outcome.spy_null_reason, outcome.null_reason].every(field => field === null || typeof field === "string") &&
+          [outcome.stock_return, outcome.spy_return, outcome.excess_return].every(field => field === null || typeof field === "number" && Number.isFinite(field)) &&
+          (outcome.status !== "complete" || [outcome.stock_return, outcome.spy_return, outcome.excess_return].every(field => field !== null))))) {
+    throw new Error("The journal returned an unsupported response. Please try again later.");
+  }
+  return value;
+}
 
 export async function loadSnapshot(accessToken?: string): Promise<PublicSnapshot> {
   if (!apiBase) {

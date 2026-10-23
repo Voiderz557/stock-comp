@@ -16,7 +16,7 @@ def test_google_sign_in_uses_nonce_and_keeps_redirect_fallback():
     assert "signInWithIdToken" in source
     assert "console.log" not in source
     assert "Use Google redirect instead" in page
-    assert 'onOAuth("google")' in page
+    assert 'continueWith("google")' in page
 
 
 def test_microsoft_button_tracks_remote_provider_configuration():
@@ -24,5 +24,5 @@ def test_microsoft_button_tracks_remote_provider_configuration():
     page = (ROOT / "web" / "app" / "page.tsx").read_text(encoding="utf-8")
     assert "settings.external?.azure === true" in source
     assert 'scopes: provider === "azure" ? "email"' in source
-    assert "disabled={!microsoftReady}" in page
+    assert "{microsoftReady && <button" in page
     assert "Microsoft sign-in is not configured yet" in page

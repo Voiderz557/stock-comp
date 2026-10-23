@@ -25,6 +25,28 @@ function harness(handler = () => snapshot(), options = {}) {
   }, ...options });
   return { api, calls };
 }
+
+test("research and journal forward only authenticated read-only allowlisted paths", async () => {
+  const configured = { ...env, STOCK_COMP_PYTHON_API_URL: "https://engine.onrender.com" };
+  for (const path of ["research/company/AAPL", "recommendation-journal"]) {
+    const { api, calls } = harness(() => ({ items: [] }));
+    await api(request(path), configured);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].url, `https://engine.onrender.com/v1/${path}`);
+    assert.equal(calls[1].method, "GET");
+    assert.equal(calls[1].headers.Authorization, "Bearer user-token");
+    assert.equal(calls[1].body, undefined);
+    await assert.rejects(api(request(path, "POST", {}), configured), e => e.status === 404);
+  }
+});
+
+test("research refuses arbitrary destinations and malformed tickers", async () => {
+  for (const path of ["research/company/https%3A%2F%2Fevil.example", "research/company/AAPL/extra", "research/company/TOOLONGTICKER"]) {
+    const { api, calls } = harness();
+    await assert.rejects(api(request(path), { ...env, STOCK_COMP_PYTHON_API_URL: "https://engine.onrender.com" }), e => e.status === 404);
+    assert.equal(calls.length, 1);
+  }
+});
 test("native fetch retains its global receiver in Worker runtimes", async () => {
   const original = globalThis.fetch;
   let calls = 0;

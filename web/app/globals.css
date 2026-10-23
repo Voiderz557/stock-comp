@@ -53,6 +53,41 @@ a:focus-visible { outline: 3px solid rgba(8, 124, 97, .28); outline-offset: 3px;
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mint); display: inline-block; }
 .signin-panel { display: grid; place-items: center; padding: 48px; background: #eef4f5; }
 .signin-card { width: min(100%, 410px); }
+.polished-signin .signin-grid { grid-template-columns: minmax(0, 1fr) minmax(380px, .85fr); }
+.polished-signin .signin-story { padding: clamp(28px, 4vw, 64px); gap: 48px; }
+.polished-signin .signin-story::after { pointer-events: none; opacity: .45; }
+.polished-signin .story-copy h1 { font-size: clamp(2.8rem, 5vw, 5.2rem); line-height: 1.04; }
+.polished-signin .story-copy h1 span { color: var(--mint); }
+.polished-signin .story-copy > p { font-size: 1.05rem; max-width: 470px; }
+.signin-features { display: grid; gap: 22px; margin-top: 34px; }
+.signin-features > div { display: flex; align-items: center; gap: 16px; }
+.signin-features svg { color: var(--mint); flex-shrink: 0; }
+.signin-features strong, .signin-features small { display: block; }
+.signin-features strong { font-size: .91rem; font-weight: 650; }
+.signin-features small { margin-top: 5px; font-size: .79rem; color: #afc3ce; }
+.polished-signin .signin-panel { padding: clamp(28px, 4vw, 64px); }
+.polished-signin .signin-card { padding: clamp(24px, 3vw, 40px); width: min(100%, 465px); background: white; border: 1px solid var(--line); border-radius: 22px; box-shadow: 0 16px 48px rgba(7,19,31,.05); }
+.signin-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 32px; background: var(--surface-soft); border-radius: 10px; }
+.signin-modes button { border: 0; border-radius: 7px; min-height: 38px; cursor: pointer; color: var(--muted); background: transparent; font-weight: 700; font-size: .83rem; }
+.signin-modes button[aria-pressed="true"] { background: white; color: var(--ink); box-shadow: 0 2px 5px rgba(7,19,31,.06); }
+.polished-signin .oauth-button { min-height: 48px; margin-top: 8px; }
+.google-letter { font-size: 1.15rem; color: #4285f4; font-weight: 800; }
+.polished-signin .magic-form input { height: 48px; }
+.polished-signin .magic-form .primary-button { min-height: 48px; margin-top: 4px; }
+.secondary-button.full { width: 100%; }
+.signin-assurance { display: flex; align-items: flex-start; gap: 9px; padding-top: 23px; border-top: 1px solid var(--line); color: var(--muted); font-size: .75rem; line-height: 1.5; margin: 24px 0 14px !important; }
+.signin-assurance svg { flex-shrink: 0; color: var(--mint-deep); }
+.signin-help { font-size: .74rem; color: var(--muted); line-height: 1.6; }
+.signin-help summary { cursor: pointer; padding: 4px 0; }
+.signin-help p { margin: 9px 0; }
+.polished-signin .magic-status { padding: 12px; border-radius: 9px; background: #e4f7ef; line-height: 1.6; }
+.polished-signin button:disabled { opacity: .5; cursor: not-allowed; }
+.account-loading { text-align: center; }
+.account-loading .logo { justify-content: center; margin-bottom: 32px; }
+.account-loading > p { color: var(--muted); line-height: 1.6; }
+.auth-spinner { animation: auth-spin 1s linear infinite; }
+.auth-loading-ring { display: inline-block; width: 28px; height: 28px; border: 3px solid var(--line); border-top-color: var(--mint-deep); border-radius: 50%; }
+@keyframes auth-spin { to { transform: rotate(360deg); } }
 .signin-card h2 { font-size: 2.2rem; letter-spacing: -.04em; margin: 12px 0 10px; }
 .signin-card > p { color: var(--muted); line-height: 1.65; margin: 0 0 28px; }
 .oauth-button, .primary-button, .secondary-button { border: 0; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; border-radius: 10px; font-weight: 750; }
@@ -212,6 +247,12 @@ a:focus-visible { outline: 3px solid rgba(8, 124, 97, .28); outline-offset: 3px;
 .view-stack { display: grid; gap: 18px; }
 .view-stack .positions-panel, .portfolio-detail-panel { margin-top: 0; }
 .full-plan-banner { margin: 0; }
+.holdings-review-panel { padding: 24px; }
+.holdings-review-panel > p, .holding-review p { color: var(--muted); font-size: .86rem; line-height: 1.55; overflow-wrap: anywhere; }
+.holding-review { border-top: 1px solid var(--line); padding: 16px 0; }
+.holding-review h3 { font-size: .95rem; margin: 0 0 8px; }
+.holdings-review-panel .panel-heading { flex-wrap: wrap; gap: 12px; }
+.recommendation-reason { grid-column: 2 / -1; margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; }
 .plan-builder { padding: 24px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 22px; }
 .plan-builder h2 { margin: 6px 0 8px; font-size: 1.25rem; letter-spacing: -.03em; }
 .plan-builder p { margin: 0; color: var(--muted); font-size: .84rem; line-height: 1.5; }
@@ -370,6 +411,12 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 
 @media (max-width: 840px) {
+  .polished-signin .signin-grid { display: flex; flex-direction: column-reverse; }
+  .polished-signin .signin-panel { padding: 28px 18px; }
+  .polished-signin .signin-story { min-height: auto; gap: 28px; padding: 30px 26px; }
+  .polished-signin .signin-card { padding: 26px; }
+  .polished-signin .story-copy h1 { font-size: 2.8rem; }
+  .polished-signin .signin-features { margin-top: 24px; }
   .signin-shell { padding: 0; }
   .signin-grid { min-height: 100vh; grid-template-columns: 1fr; border: 0; border-radius: 0; }
   .signin-story { min-height: 48vh; padding: 28px; }
@@ -428,5 +475,5 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }

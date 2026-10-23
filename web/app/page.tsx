@@ -16,7 +16,9 @@ import {
   Compass,
   History,
   LayoutDashboard,
+  LoaderCircle,
   LogOut,
+  Mail,
   Menu,
   OctagonAlert,
   Settings,
@@ -31,6 +33,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { LegalLinks } from "@/components/legal-links";
 import { GoogleSignIn } from "@/components/google-sign-in";
 import { AccountEditor } from "@/components/account-editor";
+import { CompanyResearch, type ExternalResearch } from "@/components/company-research";
+import { RecommendationJournal } from "@/components/recommendation-journal";
+import { loadCompanyResearch, loadRecommendationJournal, type RecommendationJournalResponse } from "@/lib/api";
 import { AccountNotFoundError, buildDailyPlan, changeRecommendationStatus, createAccount, loadAccountArchive, loadPaperActions, loadPlanHistory, loadPlanningProfiles, loadSnapshot, loadStrategies, loadTradingViewAutoPlan, loadVixContext, demoMode, recordPaperAction, savePlanningProfile, updateAccount } from "@/lib/api";
 import type { AccountUpdate, PlanningProfileInput, TradingViewAutoPlan, VixContext, PlanProgress } from "@/lib/api";
 import { DEFAULT_COMPETITION_PROFILE, effectiveMinimumPrice, managedAppSettingsProfile, resolvePlanningSettings, savedAppSettingsProfile } from "@/lib/planning-settings";
@@ -84,7 +89,7 @@ function SignIn({
   error,
 }: {
   onDemo: () => void;
-  onOAuth: (provider: "google" | "azure") => void;
+  onOAuth: (provider: "google" | "azure") => Promise<void>;
   onMagicLink: (email: string) => Promise<void>;
   onGoogleError: (message: string) => void;
   googleReady: boolean;
@@ -94,70 +99,96 @@ function SignIn({
   error: string | null;
 }) {
   const [email, setEmail] = useState("");
-  const [magicStatus, setMagicStatus] = useState<string | null>(null);
+  const [magicStatus, setMagicStatus] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [sendingMagic, setSendingMagic] = useState(false);
+  const [oauthPending, setOAuthPending] = useState<"google" | "azure" | null>(null);
+  const [joining, setJoining] = useState(false);
+  const inFlight = useRef(false);
+  const busy = sendingMagic || oauthPending !== null;
+
+  async function continueWith(provider: "google" | "azure") {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setOAuthPending(provider);
+    try { await onOAuth(provider); }
+    finally { inFlight.current = false; setOAuthPending(null); }
+  }
 
   async function submitMagicLink(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!magicReady || inFlight.current || !email.trim()) return;
+    inFlight.current = true;
     setSendingMagic(true);
     setMagicStatus(null);
     try {
       await onMagicLink(email.trim());
-      setMagicStatus("Check your email for the secure sign-in link.");
+      setMagicStatus({ kind: "success", message: "Check your inbox for your sign-in link. Open it on this device to continue. If it doesn’t arrive, check spam before trying again." });
     } catch (magicError) {
-      setMagicStatus(magicError instanceof Error ? magicError.message : "Email sign in could not be started.");
+      setMagicStatus({ kind: "error", message: magicError instanceof Error ? magicError.message : "Email sign in could not be started. Please try again." });
     } finally {
       setSendingMagic(false);
+      inFlight.current = false;
     }
   }
 
   return (
-    <main className="signin-shell">
+    <main className="signin-shell polished-signin">
       <div className="signin-grid">
         <section className="signin-story">
           <Logo />
           <div className="story-copy">
-            <span className="eyebrow">A calmer way to compete</span>
-            <h1>Know what matters before the market moves.</h1>
-            <p>Bring your portfolio, daily plan, algorithm signals, and paper-trading history into one focused decision surface.</p>
+            <span className="eyebrow">Your paper-trading workspace</span>
+            <h1>A clearer plan.<br /><span>A calmer trade.</span></h1>
+            <p>Your portfolio, strategy signals, and daily decisions. Together, without the noise.</p>
+            <div className="signin-features">
+              <div><Compass size={19} aria-hidden="true" /><span><strong>Understand the next move</strong><small>Ranked ideas with reasons, not promises.</small></span></div>
+              <div><WalletCards size={19} aria-hidden="true" /><span><strong>Keep your account in view</strong><small>Cash, holdings, and room for new positions.</small></span></div>
+              <div><History size={19} aria-hidden="true" /><span><strong>Learn from yesterday</strong><small>Saved plans and recorded paper actions.</small></span></div>
+            </div>
           </div>
           <div className="market-ribbon">
-            <span><i className="status-dot" /> Research preview</span>
+            <span><ShieldCheck size={15} aria-hidden="true" /> Private workspace</span>
             <strong>Paper trading only</strong>
-            <span>No market data shown before sign-in</span>
+            <span>No real orders placed</span>
           </div>
         </section>
         <section className="signin-panel">
-          <div className="signin-card">
-            <span className="eyebrow">Private preview</span>
-            <h2>Welcome back</h2>
-            <p>{googleReady || microsoftReady ? "Sign in to open your private competition account." : magicReady ? "Use a secure email link to open your private competition account." : "Authentication is not configured yet. Use the isolated sample account."}</p>
+          <div className="signin-card" aria-labelledby="signin-title">
+            <div className="signin-modes" role="group" aria-label="Account access">
+              <button type="button" aria-pressed={!joining} onClick={() => { setJoining(false); setMagicStatus(null); }} disabled={busy}>Log in</button>
+              <button type="button" aria-pressed={joining} onClick={() => { setJoining(true); setMagicStatus(null); }} disabled={busy}>Get started</button>
+            </div>
+            <span className="eyebrow">Paper-trading preview</span>
+            <h2 id="signin-title">{joining ? "Start your workspace" : "Welcome back."}</h2>
+            <p>{joining ? "Sign in securely, then set up your paper account. Already have an account? The same sign-in restores it." : "Log in to your saved portfolio and daily plan."}</p>
             {googleReady && googleDirectConfigured && <GoogleSignIn onError={onGoogleError} />}
             {googleReady && googleDirectConfigured ? (
-              <button className="text-button oauth-fallback" onClick={() => onOAuth("google")}>Use Google redirect instead</button>
-            ) : (
-              <button className="oauth-button" onClick={() => onOAuth("google")} disabled={!googleReady}>
-                <span className="provider-mark">G</span> Continue with Google
+              <button className="text-button oauth-fallback" onClick={() => void continueWith("google")} disabled={busy}>Use Google redirect instead</button>
+            ) : googleReady ? (
+              <button className="oauth-button" onClick={() => void continueWith("google")} disabled={busy}>
+                {oauthPending === "google" ? <LoaderCircle size={19} className="auth-spinner" aria-hidden="true" /> : <span className="google-letter" aria-hidden="true">G</span>} {oauthPending === "google" ? "Opening Google…" : "Continue with Google"}
               </button>
-            )}
-            {googleReady && !googleDirectConfigured && <p className="auth-provider-note">The Google redirect may show our Supabase authentication domain. Check that the address begins with your project&apos;s trusted Supabase URL.</p>}
-            <button className="oauth-button" onClick={() => onOAuth("azure")} disabled={!microsoftReady}>
+            ) : null}
+            {microsoftReady && <button className="oauth-button" onClick={() => void continueWith("azure")} disabled={busy}>
               <span className="provider-mark microsoft">M</span> Continue with Microsoft
-            </button>
-            {!microsoftReady && supabaseConfigured && <p className="auth-provider-note">Microsoft sign-in is not configured yet. You can use Google or an email link for now.</p>}
+            </button>}
             {error && <p className="auth-error" role="alert">{error}</p>}
-            <div className="divider"><span>email sign in</span></div>
-            <form className="magic-form" onSubmit={submitMagicLink}>
+            {magicReady && <>
+            {(googleReady || microsoftReady) && <div className="divider"><span>or use your email</span></div>}
+            <form className="magic-form" onSubmit={submitMagicLink} aria-busy={sendingMagic}>
               <label htmlFor="signin-email">Email address</label>
-              <div>
-                <input id="signin-email" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" disabled={!magicReady || sendingMagic} />
-                <button className="secondary-button" type="submit" disabled={!magicReady || sendingMagic}>{sendingMagic ? "Sending…" : "Email me a link"}</button>
-              </div>
-              {magicStatus && <p className="magic-status" role="status">{magicStatus}</p>}
+              <input id="signin-email" type="email" autoComplete="email" inputMode="email" required value={email} onChange={(event) => { setEmail(event.target.value); setMagicStatus(null); }} placeholder="you@example.com" disabled={busy} aria-describedby="email-help" />
+              <button className="primary-button full" type="submit" disabled={busy || !email.trim()}>{sendingMagic ? <LoaderCircle size={17} className="auth-spinner" aria-hidden="true" /> : <Mail size={17} aria-hidden="true" />}{sendingMagic ? "Sending your link…" : "Send sign-in link"}</button>
+              <p className="auth-provider-note" id="email-help">No password to remember. We’ll email you a secure link.</p>
+              {magicStatus && <p className={magicStatus.kind === "error" ? "auth-error" : "magic-status"} role={magicStatus.kind === "error" ? "alert" : "status"}>{magicStatus.message}</p>}
             </form>
-            <div className="divider"><span>prototype access</span></div>
-            <button className="primary-button full" onClick={onDemo} disabled={!demoReady}>Open demo account <ArrowRight size={17} /></button>
-            <p className="fine-print"><ShieldCheck size={14} /> Demo mode never reads your local portfolio database.</p>
+            </>}
+            {!googleReady && !microsoftReady && !magicReady && <p className="auth-error" role="alert">Sign-in is unavailable right now. Please refresh or try again later.</p>}
+            {demoReady && <><div className="divider"><span>sample workspace</span></div>
+            <button className="secondary-button full" onClick={onDemo} disabled={busy}>Explore demo account <ArrowRight size={17} /></button>
+            <p className="fine-print">The demo is separate from your saved account.</p></>}
+            <p className="signin-assurance"><ShieldCheck size={16} aria-hidden="true" /><span>Paper trading only. Nothing here places real trades.</span></p>
+            <details className="signin-help"><summary>About sign-in &amp; account access</summary><p>Anyone can open this website. Sign in to access your own saved paper account; other visitors cannot access it. First-time sign-in continues to account setup; returning users keep their saved account. Use the same Google account or email as before to restore it. Your session stays signed in on this browser until you sign out or it expires. No market data shown before sign-in.</p>{googleReady && !googleDirectConfigured && <p>Google may show our Supabase authentication domain during sign-in.</p>}{!microsoftReady && <p>Microsoft sign-in is not configured yet.</p>}</details>
             <LegalLinks />
           </div>
         </section>
@@ -318,10 +349,12 @@ function AppShell({
   settingsError,
   scanProgress,
   onStopPreview,
+  onLoadResearch,
+  onLoadJournal,
 }: {
   onSignOut: () => void;
   onUpdateAccount: (account: AccountUpdate) => Promise<void>;
-  onBuildPlan: (strategy: string, targetPositionValue: number, minimumPrice: number, universeMode: "EXPANDED" | "BROAD") => Promise<void>;
+  onBuildPlan: (strategy: string, targetPositionValue: number, minimumPrice: number, universeMode: "EXPANDED" | "BROAD") => Promise<PublicSnapshot | void>;
   onRecommendationEvent: (id: string, eventType: "DISMISSED" | "REOPENED") => Promise<void>;
   onExportAccount: () => Promise<void>;
   onRecordPaperAction: (recommendationId: string, quantity: number, expectedVersion: number, idempotencyKey: string) => Promise<void>;
@@ -340,6 +373,8 @@ function AppShell({
   settingsError: string | null;
   scanProgress?: PlanProgress | null;
   onStopPreview: (input: { ticker: string; available_cash: number; account_equity: number }) => Promise<TradingViewAutoPlan>;
+  onLoadResearch: (ticker: string) => Promise<ExternalResearch>;
+  onLoadJournal: () => Promise<RecommendationJournalResponse>;
 }) {
   const [active, setActive] = useState("Overview");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -350,11 +385,16 @@ function AppShell({
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Recommendation | null>(null);
+  const [researchTicker, setResearchTicker] = useState("");
   const [paperAction, setPaperAction] = useState<Recommendation | null>(null);
   const [paperQuantity, setPaperQuantity] = useState(0);
   const [paperActionKey, setPaperActionKey] = useState<string | null>(null);
   const [paperActionBusy, setPaperActionBusy] = useState(false);
   const [paperActionError, setPaperActionError] = useState<string | null>(null);
+  const paperActionInFlight = useRef(false);
+  const planBuildInFlight = useRef(false);
+  const [postTradeStatus, setPostTradeStatus] = useState<"UPDATING" | "UPDATED" | "NEEDS_REFRESH" | null>(null);
+  const [accountChangeLabel, setAccountChangeLabel] = useState("Paper trade recorded");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -445,14 +485,22 @@ function AppShell({
   }
 
   async function generatePlan() {
-    if (buildingPlan || source !== "api") return;
+    if (planBuildInFlight.current || source !== "api") return false;
+    planBuildInFlight.current = true;
     setBuildingPlan(true);
     setPlanError(null);
     try {
-      await onBuildPlan(planStrategy, targetPositionValue, effectiveMinimumPrice({ minimum_price_mode: minimumPriceMode, minimum_price: Number(minimumPrice), strategy: planStrategy, target_position_value: targetPositionValue }), universeMode);
+      const replacement = await onBuildPlan(planStrategy, targetPositionValue, effectiveMinimumPrice({ minimum_price_mode: minimumPriceMode, minimum_price: Number(minimumPrice), strategy: planStrategy, target_position_value: targetPositionValue }), universeMode);
+      if (replacement && !isPlanActionable(replacement.plan, Date.now())) {
+        throw new Error("The account or market date changed again during the scan. Keep the recorded action; rebuild only the plan.");
+      }
+      if (postTradeStatus === "NEEDS_REFRESH") setPostTradeStatus("UPDATED");
+      return true;
     } catch (error) {
       setPlanError(error instanceof Error ? error.message : "Today’s plan could not be generated.");
+      return false;
     } finally {
+      planBuildInFlight.current = false;
       setBuildingPlan(false);
     }
   }
@@ -468,7 +516,17 @@ function AppShell({
       setExportBusy(false);
     }
   }
+  async function refreshAfterAccountChange(label: string) {
+    setSelected(null);
+    setPaperAction(null);
+    setActive("Today's plan");
+    setAccountChangeLabel(label);
+    setPostTradeStatus("UPDATING");
+    const refreshed = await generatePlan();
+    setPostTradeStatus(refreshed ? "UPDATED" : "NEEDS_REFRESH");
+  }
   function reviewPaperAction(item: Recommendation) {
+    if (planBuildInFlight.current || paperActionInFlight.current) return;
     if (!isPlanActionable(snapshot.plan, Date.now())) {
       setRecommendationError("The plan market date is no longer current. Build a fresh plan before reviewing a paper action.");
       return;
@@ -480,7 +538,7 @@ function AppShell({
     setPaperAction(item);
   }
   async function confirmPaperAction() {
-    if (!paperAction?.id || !paperActionKey || paperActionBusy || !snapshot.account) return;
+    if (!paperAction?.id || !paperActionKey || paperActionInFlight.current || planBuildInFlight.current || !snapshot.account) return;
     if (paperActionBlocker) {
       setPaperActionError(paperActionBlocker);
       return;
@@ -493,14 +551,19 @@ function AppShell({
       setPaperActionError("Below-$5 research candidates cannot be recorded as competition paper BUY actions.");
       return;
     }
+    paperActionInFlight.current = true;
     setPaperActionBusy(true);
     setPaperActionError(null);
     try {
       await onRecordPaperAction(paperAction.id, paperQuantity, snapshot.account.portfolio_version, paperActionKey);
       setPaperAction(null);
+      // Only a confirmed write starts this read-only refresh. A scan failure
+      // must never be reported as a failed trade or resubmit the paper action.
+      await refreshAfterAccountChange("Paper trade recorded");
     } catch (error) {
       setPaperActionError(error instanceof Error ? error.message : "Paper action could not be confirmed.");
     } finally {
+      paperActionInFlight.current = false;
       setPaperActionBusy(false);
     }
   }
@@ -539,6 +602,8 @@ function AppShell({
   const dismissedRecommendations = planActionable
     ? snapshot.recommendations.filter((item) => item.status === "DISMISSED" || dismissed.includes(item.ticker))
     : [];
+  const heldTickers = new Set(snapshot.positions.map((position) => position.ticker));
+  const newBuyRecommendations = visibleRecommendations.filter((item) => item.action === "BUY" && !heldTickers.has(item.ticker));
   const invested = snapshot.portfolio.long_exposure === null || snapshot.portfolio.short_exposure === null
     ? null
     : snapshot.portfolio.long_exposure + Math.abs(snapshot.portfolio.short_exposure);
@@ -633,14 +698,14 @@ function AppShell({
 
           <section className="plan-banner">
             <div className="plan-banner-main">
-              <span className="section-kicker">Today’s plan</span>
-              <h2>{hasPlan ? snapshot.plan.summary : "Your daily plan isn’t ready yet."}</h2>
-              <p>{hasPlan ? `${snapshot.plan.strategy} · market data as of ${marketAsOf}.` : accountReady ? "Your account snapshot is ready. Build a recommendation-only plan to scan the market." : "Add your account details before building a plan."}</p>
+              <span className="section-kicker">{hasPlan && !planActionable ? "Saved plan · needs refresh" : "Today’s plan"}</span>
+              <h2>{hasPlan ? planActionable ? snapshot.plan.summary : "Start with a fresh plan." : "Your daily plan isn’t ready yet."}</h2>
+              <p>{hasPlan ? planActionable ? `${snapshot.plan.strategy} · market data as of ${marketAsOf}.` : `Your saved ${snapshot.plan.strategy} plan uses market data from ${marketAsOf}. Refresh it before reviewing paper actions.` : accountReady ? "Your account snapshot is ready. Build a recommendation-only plan to scan the market." : "Add your account details before building a plan."}</p>
             </div>
             <div className="plan-meta">
               <span><Clock3 size={15} /> Generated {generatedTime}</span>
-              <span><Check size={15} /> {planActionable ? "Portfolio matched" : planStatus}</span>
-              <button className="secondary-button" onClick={() => setActive("Today's plan")}>{hasPlan ? "Review full plan" : "See plan status"} <ChevronRight size={16} /></button>
+              <span>{planActionable ? <Check size={15} /> : <Clock3 size={15} />} {planActionable ? "Portfolio matched" : planStatus}</span>
+              <button className="secondary-button" onClick={() => setActive("Today's plan")}>{hasPlan ? planActionable ? "Review full plan" : "Open plan builder" : "See plan status"} <ChevronRight size={16} /></button>
             </div>
           </section>
           {planDateWarning && <section className="notice warning-notice" role="alert"><OctagonAlert size={18} /><div><strong>Plan needs a fresh market date</strong><p>{planDateWarning}</p></div></section>}
@@ -708,6 +773,7 @@ function AppShell({
 
           {active === "Today's plan" && (
             <section className="view-stack" aria-label="Today's plan details">
+              {postTradeStatus && <section className="notice warning-notice" role={postTradeStatus === "NEEDS_REFRESH" ? "alert" : "status"}><ShieldCheck size={18} /><div><strong>{accountChangeLabel} — {postTradeStatus === "UPDATING" ? "updating your plan" : postTradeStatus === "UPDATED" ? "plan refreshed" : "plan still needs refreshing"}</strong><p>{postTradeStatus === "UPDATING" ? "Your cash and holdings are saved. Rechecking what you own and what you can buy next. No additional trade will be placed." : postTradeStatus === "UPDATED" ? "The replacement plan uses your updated holdings and remaining cash. Review it before another paper action." : "The account update succeeded, but the recommendation refresh failed. Do not record the same trade or account update again. Use Rebuild plan to retry only the scan."}</p></div></section>}
               {source === "api" && <section className="panel plan-builder">
                 <div><span className="section-kicker">Recommendation only</span><h2>{hasPlan ? "Rebuild today’s plan" : "Build your first daily plan"}</h2><p>Consensus checks every live-enabled strategy; individual strategies remain selectable. Set a per-stock target to spread capital across more names when enough qualify. Shares use the last dated close, not a live fill. Nothing trades automatically.</p></div>
                 <div className="plan-builder-controls"><div className="plan-settings-summary"><strong>{planStrategy}</strong><span>{universeMode === "BROAD" ? "Broad cross-sector" : "Expanded"} watchlist · {money(targetPositionValue)} per stock · {minimumPriceMode === "ANY" ? "Any eligible price ($5+)" : `Minimum $${minimumPrice}`} · {stopLossEnabled ? "Stop guide on" : "Stop guide off"}</span><button className="text-button" type="button" onClick={() => setActive("Settings")}>Adjust settings</button></div><button className="primary-button" disabled={buildingPlan || !accountReady || strategies.length === 0} onClick={() => void generatePlan()}>{buildingPlan ? "Scanning market…" : hasPlan ? "Rebuild plan" : "Build plan"}</button></div>
@@ -729,10 +795,24 @@ function AppShell({
               {snapshot.plan.warnings.length > 0 && (
                 <section className="notice warning-notice"><OctagonAlert size={18} /><div><strong>Plan warnings and scan audit ({snapshot.plan.warnings.length})</strong><details><summary>Review dated-price and coverage details</summary><ul>{snapshot.plan.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></details></div></section>
               )}
+              <section className="panel holdings-review-panel" aria-label="What to do with your holdings">
+                <div className="panel-heading"><div><span className="section-kicker">Your updated account</span><h2>What to do with stocks you own</h2></div><strong>Cash remaining: {money(snapshot.portfolio.cash)}</strong></div>
+                {!planActionable && <p role="note">The saved plan no longer matches your account or market date. Holdings remain saved; refresh the plan before acting on a holding review or buying another stock.</p>}
+                <p>Trades made in TradingView or another broker are not synced automatically. Save their updated cash and holdings through Update account first.</p>
+                {snapshot.positions.length === 0 ? <p>No open positions. Review new candidates below; there is no obligation to invest all your cash.</p> : snapshot.positions.map((position) => {
+                  const review = visibleRecommendations.find((item) => item.ticker === position.ticker);
+                  const rawHoldingReview = review?.factor_details?.["Holding Review"];
+                  const holdingReview = rawHoldingReview && typeof rawHoldingReview === "object" && !Array.isArray(rawHoldingReview) ? rawHoldingReview as Record<string, unknown> : null;
+                  const reviewLabel = position.side === "SHORT" ? "MANUAL SHORT REVIEW" : holdingReview ? holdingReview.Action === "KEEP" ? "HOLD / WAIT" : holdingReview.Action === "REVIEW EXIT" ? "REVIEW SELL" : "REVIEW UNAVAILABLE" : !review || review.signal === "UNAVAILABLE" ? "REVIEW UNAVAILABLE" : review.action === "SELL" ? "REVIEW SELL" : review.action === "BUY" ? "REVIEW ADDITION" : review.action === "AVOID" ? "REVIEW RISK" : "HOLD / WAIT";
+                  const holdingReason = typeof holdingReview?.Reason === "string" ? holdingReview.Reason : review?.reason;
+                  return <article className="holding-review" key={`${position.ticker}-${position.side}`}><h3>{position.ticker} · {reviewLabel}</h3><p>{position.quantity} shares · {position.side} · dated market value {money(position.value)}</p><p>{holdingReason ?? (planActionable ? "No active, scored review is available for this holding. Missing data is not a sell signal. Check the plan warnings." : "Waiting for a fresh review using your current portfolio. No hold or sell decision is inferred from the old plan.")}</p>{review?.action === "BUY" && <p>Separate addition proposal: {proposedShares(review) ?? "unavailable"} shares · {money(proposedAllocation(review))}. {review.reason} You do not have to add to this holding.</p>}{review && <button className="secondary-button" onClick={() => setSelected(review)}>Inspect {position.ticker} review</button>}</article>;
+                })}
+              </section>
               <section className="panel recommendations-panel">
-                <div className="panel-heading"><div><span className="section-kicker">Full plan</span><h2>Ranked recommendations</h2></div></div>
-                {visibleRecommendations.length ? <div className="recommendation-list">
-                  {visibleRecommendations.map((item, index) => (
+                <div className="panel-heading"><div><span className="section-kicker">Next opportunities</span><h2>New buys to review</h2></div></div>
+                <p>Ranked after accounting for your holdings, available cash and portfolio limits. Suggested allocations require your review; they are not orders.</p>
+                {newBuyRecommendations.length ? <div className="recommendation-list">
+                  {newBuyRecommendations.map((item, index) => (
                     <article className="recommendation-row" key={item.ticker}>
                       <span className="rank">{String(index + 1).padStart(2, "0")}</span>
                       <div className="ticker-cell"><strong>{item.ticker}</strong><span>{proposedShares(item) === null ? item.company : `${proposedShares(item)} whole shares · ${money(proposedAllocation(item))}`}</span></div>
@@ -741,9 +821,10 @@ function AppShell({
                       <div className="price-cell"><strong>{item.price === null ? "Unavailable" : `$${item.price.toFixed(2)}`}</strong><span>{item.strategy}</span></div>
                       <button className="row-button" onClick={() => setSelected(item)}>Inspect <ChevronRight size={16} /></button>
                       <button className="dismiss-button" disabled={recommendationBusy} onClick={() => void changeStatus(item, "DISMISSED")} aria-label={`Dismiss ${item.ticker}`}><X size={15} /></button>
+                      <p className="recommendation-reason">{item.reason}</p>
                     </article>
                   ))}
-                </div> : <div className="empty-state"><Compass size={28} /><h3>No visible recommendations</h3><p>{planDateWarning ?? (dismissedRecommendations.length ? "Review dismissed recommendations below to restore one." : "Build a recommendation-only plan above to rank the current candidates.")}</p></div>}
+                </div> : <div className="empty-state"><Compass size={28} /><h3>{planActionable ? "No new-stock buys qualify" : "New buys need a refreshed plan"}</h3><p>{planDateWarning ?? (planActionable ? "Keep unallocated cash when no new stock fits the signals, remaining cash and limits. Review your existing holdings and any separate addition proposals above." : "Your account is saved. Build a replacement plan using its current cash and holdings.")}</p></div>}
                 {recommendationError && <p className="auth-error" role="alert">{recommendationError}</p>}
                 {dismissedRecommendations.length > 0 && <div className="dismissed-list"><h3>Dismissed from this plan</h3>{dismissedRecommendations.map((item) => <div key={item.id ?? item.ticker}><span>{item.ticker} · {item.action}</span><button className="text-button" disabled={recommendationBusy} onClick={() => void changeStatus(item, "REOPENED")}>Restore</button></div>)}</div>}
               </section>
@@ -769,6 +850,7 @@ function AppShell({
 
           {active === "History" && (
             <section className="view-stack" aria-label="Plan history">
+              <RecommendationJournal enabled={source === "api"} loadJournal={onLoadJournal} />
               <section className="panel standalone-panel"><span className="section-kicker">Saved plans</span><h2>How your recommendations changed</h2><p>These are saved plan summaries. This view does not claim to show a complete paper-action history.</p>
                 {historyError && <p className="auth-error" role="alert">{historyError}</p>}
                 {history.length === 0 && !historyError && <p>No saved plans are available yet.</p>}
@@ -781,6 +863,14 @@ function AppShell({
 
           {active === "Research" && (
             <section className="view-stack">
+              <section className="panel standalone-panel">
+                <h2>Company sources</h2>
+                <label>Research ticker<input value={researchTicker} maxLength={16} placeholder="e.g. AAPL"
+                  onChange={(event) => setResearchTicker(event.target.value.trim().toUpperCase())} /></label>
+                <p>Enter a ticker, then use Check outside information. No request runs while typing.</p>
+                {source !== "api" && <p>Sign in to check outside sources; demo research is unavailable.</p>}
+              </section>
+              <CompanyResearch ticker={researchTicker} loadResearch={onLoadResearch} enabled={source === "api"} />
               <section className="panel standalone-panel research-copy"><span className="section-kicker">Research only</span><h2>Current algorithm context</h2><p>Strategy and regime facts below came from the saved plan. VIX is a separate dated market reading; it does not alter these signals or place trades.</p><div className="research-grid"><div><span>Plan strategy</span><strong>{snapshot.plan.strategy || "Unavailable"}</strong></div><div><span>Regime at plan generation</span><strong>{snapshot.regime.label || "Unavailable"}</strong></div><div><span>Preferred strategies then</span><strong>{snapshot.regime.preferred_strategies.length ? snapshot.regime.preferred_strategies.join(", ") : "Unavailable"}</strong></div><div><span>Ranked candidates</span><strong>{snapshot.recommendations.length}</strong></div><div><span>VIX · implied volatility</span><strong>{vix?.value === null || !vix ? "Unavailable" : vix.value.toFixed(2)}{vix?.status === "STALE" ? " (stale)" : ""}</strong></div></div><p>VIX close dated {vix?.price_as_of ?? "unavailable"}. {vix?.warning ?? "This is not a live quote or a forecast for an individual stock."}</p></section>
               <section className="notice prototype-notice"><BookOpen size={18} /><div><strong>Benchmark results are intentionally separate</strong><span>This public prototype does not run historical benchmarks or expose research files.</span></div></section>
             </section>
@@ -819,6 +909,7 @@ function AppShell({
             <div className="modal-score"><strong>{selected.score.toFixed(1)}</strong><span>recommendation score</span></div>
             <h3>Why it appears</h3>
             <p>{selected.reason}</p>
+            <CompanyResearch ticker={selected.ticker} loadResearch={onLoadResearch} enabled={source === "api"} />
             {planDateWarning && <p className="auth-error" role="alert">{planDateWarning}</p>}
             <div className="detail-facts">
               <span><small>Strategy</small><strong>{selected.strategy}</strong></span>
@@ -832,7 +923,7 @@ function AppShell({
             <div className="risk-note"><OctagonAlert size={17} /><span>{selected.action === "BUY" && selected.price !== null && selected.price < 5 ? "Below-$5 research idea only; competition paper BUY is unavailable." : "This is an algorithm signal, not a trade. Review allocation and price freshness before recording a paper action."}</span></div>
             <div className="modal-actions">
               <button className="secondary-button" disabled={recommendationBusy || !planActionable} onClick={() => { void changeStatus(selected, "DISMISSED"); setSelected(null); }}>Dismiss</button>
-              <button className="primary-button" disabled={!planActionable || Boolean(paperActionBlocker) || selected.action === "BUY" && selected.price !== null && selected.price < 5} onClick={() => { reviewPaperAction(selected); setSelected(null); }}>Review paper action <ArrowRight size={16} /></button>
+              <button className="primary-button" disabled={buildingPlan || paperActionBusy || !planActionable || Boolean(paperActionBlocker) || !["BUY", "SELL"].includes(selected.action) || selected.action === "BUY" && selected.price !== null && selected.price < 5} onClick={() => { reviewPaperAction(selected); setSelected(null); }}>Review paper action <ArrowRight size={16} /></button>
             </div>
           </section>
         </div>
@@ -852,7 +943,7 @@ function AppShell({
             {paperAction.price !== null && Number.isInteger(paperQuantity) && paperQuantity > 0 && <p>Estimated value: <strong>{money(paperQuantity * paperAction.price)}</strong>. Fees and slippage are not included.</p>}
             <div className="risk-note"><ShieldCheck size={17} /><span>{paperActionsAvailable ? "The server will recheck the plan, quote date, cash, shared capacity, and per-stock limit in one transaction. This action is paper-only." : paperActionsError ?? "Checking whether paper-action storage is available. Nothing has been submitted."}</span></div>
             {paperActionError && <p className="auth-error" role="alert">{paperActionError}</p>}
-            <div className="modal-actions"><button className="secondary-button" disabled={paperActionBusy} onClick={() => setPaperAction(null)}>Close</button><button className="primary-button" disabled={!paperActionsAvailable || paperActionBusy || source !== "api" || !planActionable || Boolean(paperActionBlocker) || paperAction.status === "DISMISSED" || paperAction.status === "RECORDED" || !paperAction.id || paperAction.price === null || (paperAction.action === "BUY" && paperAction.price < 5) || !Number.isInteger(paperQuantity) || paperQuantity <= 0 || !["BUY", "SELL"].includes(paperAction.action)} onClick={() => void confirmPaperAction()}>{paperActionBusy ? "Recording…" : paperActionsAvailable ? "Confirm paper action" : "Recording unavailable"}</button></div>
+            <div className="modal-actions"><button className="secondary-button" disabled={paperActionBusy} onClick={() => setPaperAction(null)}>Close</button><button className="primary-button" disabled={!paperActionsAvailable || paperActionBusy || buildingPlan || source !== "api" || !planActionable || Boolean(paperActionBlocker) || paperAction.status === "DISMISSED" || paperAction.status === "RECORDED" || !paperAction.id || paperAction.price === null || (paperAction.action === "BUY" && paperAction.price < 5) || !Number.isInteger(paperQuantity) || paperQuantity <= 0 || !["BUY", "SELL"].includes(paperAction.action)} onClick={() => void confirmPaperAction()}>{paperActionBusy ? "Recording…" : paperActionsAvailable ? "Confirm paper action" : "Recording unavailable"}</button></div>
           </section>
         </div>
       )}
@@ -870,7 +961,7 @@ function AppShell({
       {editingAccount && (
         <div className="modal-backdrop account-editor-backdrop" role="presentation">
           <div className="account-editor-modal" role="dialog" aria-modal="true" aria-label="Update competition account">
-            <AccountEditor snapshot={snapshot} onCancel={() => setEditingAccount(false)} onSave={async (account) => { await onUpdateAccount(account); setEditingAccount(false); }} />
+            <AccountEditor snapshot={snapshot} onCancel={() => setEditingAccount(false)} onSave={async (account) => { await onUpdateAccount(account); setEditingAccount(false); await refreshAfterAccountChange("Account snapshot saved"); }} />
           </div>
         </div>
       )}
@@ -1102,6 +1193,7 @@ export default function Home() {
     if (generation !== sessionGeneration.current) return;
     setSnapshot(updated);
     void loadPlanHistory(token).then((items) => { if (generation === sessionGeneration.current) { setHistory(items); setHistoryError(null); } }).catch((error) => { if (generation === sessionGeneration.current) { setHistory([]); setHistoryError(error instanceof Error ? error.message : "Plan history is unavailable."); } });
+    return updated;
   }
 
   async function saveRecommendationEvent(id: string, eventType: "DISMISSED" | "REOPENED") {
@@ -1142,13 +1234,30 @@ export default function Home() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  async function researchCompany(ticker: string) {
+    const token = currentToken();
+    const generation = sessionGeneration.current;
+    const response = await loadCompanyResearch(token, ticker);
+    if (generation !== sessionGeneration.current) throw new Error("Your session changed. Please load research again.");
+    return response;
+  }
+
+  async function recommendationJournal() {
+    const token = currentToken();
+    const generation = sessionGeneration.current;
+    const response = await loadRecommendationJournal(token);
+    if (generation !== sessionGeneration.current) throw new Error("Your session changed. Please load the journal again.");
+    return response;
+  }
+
   if (accessMode === "signed-out") return (
-    <SignIn onDemo={() => void openDemo()} onOAuth={(provider) => void beginOAuth(provider)} onMagicLink={beginMagicLink} onGoogleError={setAuthError} googleReady={oauthAvailability.google} microsoftReady={oauthAvailability.azure} magicReady={supabaseConfigured} demoReady={demoMode} error={authError} />
+    <SignIn onDemo={() => void openDemo()} onOAuth={beginOAuth} onMagicLink={beginMagicLink} onGoogleError={setAuthError} googleReady={oauthAvailability.google} microsoftReady={oauthAvailability.azure} magicReady={supabaseConfigured} demoReady={demoMode} error={authError} />
   );
-  if (accessMode === "loading") return <main className="auth-page" role="status">Loading account…</main>;
+  if (accessMode === "loading") return <main className="callback-shell" role="status"><section className="callback-card account-loading"><Logo /><LoaderCircle size={28} className="auth-spinner" aria-hidden="true" /><h1>Opening your workspace</h1><p>Loading account…</p><p>Your saved portfolio and plans are being restored.</p></section></main>;
   if (accessMode === "onboarding") return <AccountSetup onSave={finishAccountSetup} onSignOut={() => void signOut()} error={authError} />;
   const savedSettings = savedAppSettingsProfile(planningProfiles) ?? null;
   return <AppShell
+    key={`${accessMode}:${renderedGeneration}`}
     onSignOut={() => void signOut()} onUpdateAccount={saveAccountUpdate}
     onBuildPlan={generateDailyPlan} onRecommendationEvent={saveRecommendationEvent} onExportAccount={exportAccount} onRecordPaperAction={savePaperAction}
     strategies={strategies} history={history} historyError={historyError}
@@ -1156,5 +1265,6 @@ export default function Home() {
     snapshot={snapshot} source={accessMode === "demo" ? "demo" : "api"} vix={vix} scanProgress={scanProgress}
     savedSettings={savedSettings} settingsLoaded={settingsLoaded} onSaveSettings={saveSettings} settingsError={profileError}
     onStopPreview={(input) => loadTradingViewAutoPlan(currentToken(), input)}
+    onLoadResearch={researchCompany} onLoadJournal={recommendationJournal}
   />;
 }

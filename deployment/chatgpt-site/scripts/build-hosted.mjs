@@ -2,9 +2,12 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "n
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { canonicalSiteOrigin } from "./site-origin.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const env = { ...process.env, NEXT_PUBLIC_API_BASE_URL: "/api", NEXT_PUBLIC_DEMO_MODE: "false", NEXT_PUBLIC_HOSTED_RUNTIME_CONFIG: "true", NEXT_PUBLIC_SITE_URL: "https://stock-comp-private-preview.voider123.chatgpt.site", NEXT_PUBLIC_SUPABASE_URL: "", NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "", NEXT_TELEMETRY_DISABLED: "1" };
+// Set NEXT_PUBLIC_SITE_URL in the build environment for a custom canonical origin.
+const siteOrigin = canonicalSiteOrigin(process.env.NEXT_PUBLIC_SITE_URL);
+const env = { ...process.env, NEXT_PUBLIC_API_BASE_URL: "/api", NEXT_PUBLIC_DEMO_MODE: "false", NEXT_PUBLIC_HOSTED_RUNTIME_CONFIG: "true", NEXT_PUBLIC_SITE_URL: siteOrigin, NEXT_PUBLIC_SUPABASE_URL: "", NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "", NEXT_TELEMETRY_DISABLED: "1" };
 // Hosted configuration comes from runtime env. Local secret files are excluded
 // from source synchronization and not needed for a reproducible Site build.
 const next = spawnSync(process.execPath, [path.join(root, "node_modules/next/dist/bin/next"), "build", "--webpack"], { cwd: root, env, stdio: "inherit" });

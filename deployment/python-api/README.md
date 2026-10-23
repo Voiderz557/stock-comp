@@ -1,10 +1,12 @@
 # Portable Python API container
 
 This packages the existing `api.public_app:app` FastAPI service and unchanged
-Python strategy engine for a separate HTTPS container host. It is prepared
-source, not a configured hosting account or a verified remote deployment.
-No build, push, deployment, live account write, or benchmark is performed by
-this package.
+Python strategy engine for a separate HTTPS container host.
+[The release record](../../docs/live-plan-jobs-2026-10-15.md) documents successful
+Free Render deployments and live plan save/reload verification on 2026-10-16,
+including checkpoint `fe076b1`. Those are historical observations; live status
+was not checked for this 2026-10-23 documentation update. No build, deployment,
+account write, or benchmark was performed for this update.
 
 ## Safe build context
 
@@ -45,9 +47,10 @@ requests share the existing read limiter, so use moderate probe frequency.
 `/v1/health` is an unauthenticated liveness route returning `status: ok`; it
 does not prove that authentication, database permissions, or market providers
 are ready. The Docker health probe honors `PORT` and needs no curl package.
-Graceful shutdown allows 170 seconds for the existing 150-second plan deadline
-and final storage request, although a hosting platform may impose a shorter
-termination window.
+Graceful shutdown allows 170 seconds, although a hosting platform may impose a
+shorter termination window. The legacy synchronous plan deadline is 150 seconds;
+asynchronous jobs have a 600-second deadline and process-local progress, so a
+shutdown can interrupt a running job. This is not a durable job queue.
 
 Market prices are downloaded on demand through the existing provider code.
 `STOCK_COMP_CACHE_DIR` points at writable `/tmp/stock-comp/market-data`; yfinance
@@ -67,8 +70,10 @@ release requiring reproducible dependencies.
 
 ## Remaining hosting configuration
 
-A host account, authorized source/image delivery, and an HTTPS service URL are
-still required. Configure existing server variables in the host's secret/env
+A new installation requires a host account, authorized source/image delivery,
+and an HTTPS service URL. The existing deployment is recorded above; do not
+create a duplicate service just to follow these setup instructions.
+Configure server variables in the host's secret/env
 settings (never Docker build arguments or files in the image):
 
 - `STOCK_COMP_SUPABASE_URL` and `STOCK_COMP_SUPABASE_PUBLISHABLE_KEY` for the
@@ -94,12 +99,13 @@ existing env files/keys.
 repository-root context and health path `/v1/health`. It defines no paid
 services, databases, disks, or credential values. All env entries contain
 only a name and `sync: false`; Render asks for the values during initial
-Blueprint creation. The actual Sites HTTPS origin is entered there, because
-no verified hosted origin is available in this package. The Blueprint remains
+Blueprint creation. Enter the intended Sites HTTPS origin for that installation;
+the Blueprint does not embed an origin or credentials. The Blueprint remains
 outside the Docker source allowlist and is not copied into the image.
 
-No Render account exists for this setup yet. These are future setup steps;
-this run does not create an account, publish source, or deploy anything:
+The following are initial-setup instructions for a new installation. For the
+existing service, use its settings and the release record instead. This
+documentation update does not create an account, publish source, or deploy anything:
 
 1. Create a Render account at [Render](https://dashboard.render.com/) and sign
    in. Use a workspace suitable for Free compute; do not select paid compute
@@ -159,17 +165,19 @@ These fields and setup steps follow the official
 [Blueprint YAML reference](https://render.com/docs/blueprint-spec), checked
 2026-10-11. See also [Render web services](https://render.com/docs/web-services)
 and [Docker support](https://render.com/docs/docker). The local tests validate
-the YAML and its safety constraints; acceptance by Render and successful
-Linux/remote execution remain unverified.
+the YAML and its safety constraints. Later successful Render deployments are
+recorded above; they do not establish current live health or validate every
+future change to this package.
 
 Render warns against Free instances for production: they sleep after 15
 idle minutes, can take about a minute to wake, lose local files on restart,
 and lack persistent disks. Monthly quotas and outbound-traffic limits apply.
 See [Render Free limitations](https://render.com/docs/free) (checked
-2026-10-11). Free-tier memory/CPU and provider egress may not support broad
-scans; this has not been measured. Confirm resource headroom and proxy request
-timeouts cover the API's 150-second scan plus save before claiming reliable
-hosted planning. Cold starts also need to fit the client's request timeout.
+2026-10-11). The October 16 record confirms a successful 133.9-second BROAD
+plan, not sustained capacity or a service-level guarantee. The website now uses
+short start/status requests for asynchronous planning to avoid holding one
+proxy connection through the scan. Confirm resource headroom, restart behavior,
+and cold-start/request timeouts before claiming reliable hosted planning.
 
 ## Focused local verification
 
@@ -180,6 +188,6 @@ hosted planning. Cold starts also need to fit the client's request timeout.
 The deployment tests check the exact context allowlist, sensitive-path
 exclusions, dependency coverage, port behavior, launcher settings, and API
 liveness/fail-closed authentication from an isolated source-only copy.
-They neither fetch prices nor modify local accounts. Docker image build and
-Linux/remote runtime checks remain outstanding until Docker and an authorized
-host are available.
+They neither fetch prices nor modify local accounts. A fresh image build and
+runtime verification for subsequent changes require suitable tooling and an
+authorized host; the October 16 deployment record is not a fresh check of them.
