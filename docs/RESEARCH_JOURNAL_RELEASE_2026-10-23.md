@@ -17,7 +17,11 @@
 
 Final local verification: 730 pytest tests and 41 subtests passed (two existing framework deprecation warnings); 71 website tests passed; 33 gateway/build-origin tests passed in both canonical and native Sites checkouts. Production Next.js 16.4.3 build and TypeScript checks passed. `npm audit --omit=dev` reported zero known vulnerabilities. Local hosted preview returned HTTP 200 and the signed-out screen rendered. The earlier route-test failures were an outdated test fixture missing the new deadline callback; the corrected full suite passed.
 
-Provider tests use controlled responses; they are not proof of a successful live SEC request. No owner portfolio writes, real trades, historical benchmarks, paid services, or desktop build replacement are part of this release. Backend commit `b2dd7e9` was pushed with only its nine backend/module/test/allowlist files; publication status is recorded separately after deployment completes.
+Provider tests use controlled responses; they are not proof of a successful live SEC request. No owner portfolio writes, real trades, historical benchmarks, paid services, or desktop build replacement are part of this release.
+
+Published backend commit `b2dd7e9` to the existing Free Render service; deployment `dep-dbdpvrtg1s2s73amhhfg` succeeded. Health returned OK, the new routes were present in OpenAPI, and an unauthenticated journal request returned 401 with no-store caching. Website source commit `ef7290c` was pushed. Sites version 11, deployment `appgdep_6adba05950dc8191b2e9883edfc5f0bd`, succeeded at https://stock-comp-private-preview.voider123.chatgpt.site/ (native source commit `3fc127a5f4fd55c8c6876cfe4613f1a1132bdf2f`).
+
+Live signed-in verification on October 23: the journal loaded 104 recommendations from 9 saved plans, reported partial price coverage, and retained unavailable outcomes rather than inventing returns. The initial saved-plan-history request failed; a clean page reload restored all 9 plans and the previous-plan comparison. The initial failure's cause was not established, so this is not claimed as a diagnosed or fixed transport issue. Recent recorded actions remained visible and the account snapshot was unchanged. The stale-plan warning remained present. An explicit AAPL research check returned honest setup-required messages for SEC and Massive, not fabricated filings or an assertion of no relevant events. A live SEC fetch remains unverified until the owner configures the contact identity.
 
 ## Still separate work
 
