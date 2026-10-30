@@ -15,6 +15,26 @@ NOW = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
 MAPPING = {"0": {"ticker": "BRK-B", "cik_str": 1067983}}
 
 
+@pytest.mark.parametrize("form", ["10-K", "10-Q", "8-K", "3", "4", "5", "144", "4/A", "UNKNOWN"])
+def test_form_guides_are_bounded_and_disclose_no_content_analysis(form):
+    payload = filings()
+    payload["filings"]["recent"]["form"] = [form]
+    item = research._filings(payload, 1067983)[0]
+    assert item["title"] == f"Form {form}"
+    assert item["form"] == form
+    assert len(item["summary"]) <= 500
+    assert "document contents have not been analyzed" in item["summary"]
+    assert "score" not in item and "signal" not in item
+
+
+def test_insider_and_proposed_sale_guides_do_not_invent_transactions():
+    assert "not a congressional trading disclosure" in research._form_context("4")
+    assert "grants, gifts" in research._form_context("4")
+    assert "does not confirm that a sale was completed" in research._form_context("144")
+    assert "compare with the original" in research._form_context("10-K/A")
+    assert "no directional interpretation" in research._form_context("UNKNOWN")
+
+
 def filings(dates=None):
     dates = dates or ["2026-10-22T13:00:00Z"]
     return {"cik": "0001067983", "filings": {"recent": {

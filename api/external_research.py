@@ -46,6 +46,28 @@ _gate = threading.Lock()
 _cache = OrderedDict()
 _next_request = 0.0
 
+# Form descriptions, not analysis of a filing's contents. References:
+# https://www.sec.gov/file/readan8kpdf
+# https://www.sec.gov/files/forms-3-4-5.pdf
+# https://www.sec.gov/files/form144.pdf
+_FORM_CONTEXT = {
+    "10-K": "Annual company report. Review financial statements, business risks and management discussion; the form alone does not indicate good or bad results.",
+    "10-Q": "Quarterly company report. Review financial results and changes in risks; the form alone does not indicate growth or decline.",
+    "8-K": "Current report of company events. Read the reported items and exhibits to understand the event; this is not automatically an earnings announcement or a buy/sell signal.",
+    "3": "Initial ownership disclosure by a corporate insider. This does not by itself show a new purchase or a politician's trade.",
+    "4": "Change in a corporate insider's ownership. Transactions can include grants, gifts or other non-market activity; inspect transaction codes and footnotes before interpreting it as a purchase or sale. This is not a congressional trading disclosure.",
+    "5": "Annual corporate-insider ownership disclosure for certain transactions. The filing date is not necessarily the transaction date; this is not a congressional trading disclosure.",
+    "144": "Notice of a proposed securities sale under Rule 144. It does not confirm that a sale was completed or predict the stock's direction.",
+}
+
+
+def _form_context(form):
+    amended = form.endswith("/A")
+    base = form[:-2] if amended else form
+    description = _FORM_CONTEXT.get(base, "SEC filing. Open the source document to understand its purpose; no directional interpretation is available from the form identifier alone.")
+    prefix = "Amendment to an earlier filing; compare with the original. " if amended else ""
+    return prefix + description + " General form guide only; the document contents have not been analyzed."
+
 
 class _Unavailable(Exception):
     """Only fixed, public reason codes may be passed to this exception."""
@@ -171,6 +193,7 @@ def _filings(data, cik):
         seen.add(accession)
         items.append({"id": f"sec:{accession}", "kind": "filing",
                       "title": f"Form {form}", "form": form, "source": "SEC EDGAR",
+                      "summary": _form_context(form),
                       "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace('-', '')}/{accession}-index.html",
                       "published_at": published, "filing_date": filed,
                       "fetched_at": fetched})
