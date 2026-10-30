@@ -17,6 +17,7 @@ deployment/python-api/**
 api/**
 !api/__init__.py
 !api/account_export.py
+!api/account_deletion.py
 !api/auth.py
 !api/cloud_repository.py
 !api/demo_data.py

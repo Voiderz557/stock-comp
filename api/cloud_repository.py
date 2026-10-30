@@ -3,7 +3,9 @@
 Only saving a generated plan uses a backend-only service-role credential: the
 public plan writer is revoked so clients cannot forge strategy output. The
 API supplies the user ID from a separately verified JWT; all other account
-calls retain the user token and RLS boundary.
+calls in this module retain the user token and RLS boundary. The separate
+account_deletion module uses the server credential only after a fresh online
+identity check and an explicit, single-use self-deletion confirmation.
 """
 
 from __future__ import annotations

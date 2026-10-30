@@ -37,6 +37,7 @@ from api.plan_service import build_cloud_plan, plan_payload
 from api.plan_jobs import PlanJobs
 from api.snapshot_visibility import visible_snapshot
 from api.account_export import export_owned_account_data
+from api.account_deletion import preview_deletion, confirm_deletion
 from api.external_research import get_external_research
 from api.journal_service import load_journal
 from api.planning_profiles import (
@@ -77,6 +78,13 @@ def _allowed_origins() -> list[str]:
             raise RuntimeError("STOCK_COMP_ALLOWED_ORIGINS must use HTTPS except for localhost development.")
         return origins
     return ["http://127.0.0.1:3000", "http://localhost:3000", "http://127.0.0.1:4173"]
+
+
+class AccountDeletionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    challenge: str = Field(min_length=20, max_length=100)
+    confirmation: str = Field(max_length=100)
+    acknowledged: bool = Field(strict=True)
 
 
 class AccountCreateRequest(BaseModel):
@@ -271,6 +279,19 @@ def create_app() -> FastAPI:
     @application.get("/v1/strategies")
     def strategies(principal: Principal = Depends(require_principal)) -> dict:
         return {"strategies": plan_mode_options()}
+
+    @application.post("/v1/account-deletion/preview")
+    async def deletion_preview(principal: Principal = Depends(require_principal)) -> dict:
+        try:
+            return await asyncio.wait_for(preview_deletion(principal), timeout=45)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "Deletion review timed out. Nothing was deleted.") from None
+
+    @application.post("/v1/account-deletion/confirm")
+    async def deletion_confirm(request: AccountDeletionRequest, principal: Principal = Depends(require_principal)) -> dict:
+        if plan_jobs.active is not None and plan_jobs.active.owner == principal.user_id:
+            raise HTTPException(409, "Wait for your active market scan to finish before deleting the account.")
+        return await confirm_deletion(principal, request.challenge, request.confirmation, request.acknowledged)
 
     @application.get("/v1/account-export")
     async def account_export(principal: Principal = Depends(require_principal)) -> dict:
