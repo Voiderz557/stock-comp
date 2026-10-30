@@ -30,6 +30,7 @@ api/**
 !api/public_app.py
 !api/security.py
 !api/snapshot_visibility.py
+!api/portfolio_valuation.py
 !api/tradingview_auto.py
 
 !data/

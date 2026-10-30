@@ -36,6 +36,7 @@ from api.cloud_repository import (
 from api.plan_service import build_cloud_plan, plan_payload
 from api.plan_jobs import PlanJobs
 from api.snapshot_visibility import visible_snapshot
+from api.portfolio_valuation import load_portfolio_valuation
 from api.account_export import export_owned_account_data
 from api.account_deletion import preview_deletion, confirm_deletion
 from api.external_research import get_external_research
@@ -233,6 +234,13 @@ def create_app() -> FastAPI:
                 detail="Authenticated account storage is not configured yet.",
             )
         return visible_snapshot(await load_account_snapshot(principal.access_token, account_id))
+
+    @application.get("/v1/portfolio-valuation")
+    async def portfolio_valuation(principal: Principal = Depends(require_principal)) -> dict:
+        if principal.is_demo or not principal.access_token:
+            raise HTTPException(status_code=403, detail="Sign in to refresh portfolio prices.")
+        current = await load_account_snapshot(principal.access_token)
+        return await load_portfolio_valuation(current)
 
     @application.post("/v1/accounts", status_code=status.HTTP_201_CREATED)
     async def create_account(
