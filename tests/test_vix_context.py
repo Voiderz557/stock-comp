@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -39,3 +39,23 @@ def test_vix_load_failure_never_changes_strategy_or_fabricates_quote():
         raise RuntimeError("Provider unavailable")
 
     assert load_vix_context(as_of=date(2026, 10, 8), loader=broken_loader)["status"] == "UNAVAILABLE"
+
+
+def test_live_vix_excludes_unfinished_bar_and_accepts_completed_close():
+    frame = pd.DataFrame({"Close": [18.3, 25.0]}, index=pd.to_datetime(["2026-10-29", "2026-10-30"]))
+    def loader(*args):
+        return {"^VIX": frame}, {}
+    morning = load_vix_context(loader=loader, now=datetime(2026, 10, 30, 14, tzinfo=timezone.utc))
+    assert morning["price_as_of"] == "2026-10-29"
+    assert morning["value"] == 18.3
+    evening = load_vix_context(loader=loader, now=datetime(2026, 10, 30, 21, tzinfo=timezone.utc))
+    assert evening["price_as_of"] == "2026-10-30"
+    assert evening["value"] == 25.0
+
+
+def test_live_vix_does_not_substitute_incomplete_quote_when_prior_close_missing():
+    frame = pd.DataFrame({"Close": [25.0]}, index=pd.to_datetime(["2026-10-30"]))
+    result = load_vix_context(loader=lambda *args: ({"^VIX": frame}, {}),
+                              now=datetime(2026, 10, 30, 14, tzinfo=timezone.utc))
+    assert result["status"] == "UNAVAILABLE"
+    assert result["value"] is None

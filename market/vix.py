@@ -1,6 +1,6 @@
 """Read-only, dated VIX context; never used as realized-volatility input."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import math
 
 import pandas as pd
@@ -31,14 +31,22 @@ def summarize_vix(frame: pd.DataFrame | None, *, as_of: date) -> dict:
     return result
 
 
-def load_vix_context(*, as_of: date | None = None, loader=None) -> dict:
+def load_vix_context(*, as_of: date | None = None, loader=None, now=None) -> dict:
     if loader is None:
         from data.market_data import load_market_data
         loader = load_market_data
-    as_of = as_of or date.today()
+    live = as_of is None
+    observed_at = now or datetime.now(timezone.utc)
+    as_of = as_of or pd.Timestamp(observed_at).tz_convert("America/New_York").date()
     try:
         prices, _ = loader([VIX_SYMBOL], as_of - timedelta(days=VIX_LOOKBACK_DAYS), as_of)
-        return summarize_vix(prices.get(VIX_SYMBOL), as_of=as_of)
+        frame = prices.get(VIX_SYMBOL)
+        if live:
+            # Daily provider bars can include the still-open session. Use the
+            # same completed-close rule as live plans, without changing signals.
+            from paper_trading.prices import completed_daily_close_frame
+            frame = completed_daily_close_frame(frame, observed_at)
+        return summarize_vix(frame, as_of=as_of)
     except Exception:
         # Data-provider failures do not alter regime classification or plans.
         return summarize_vix(None, as_of=as_of)
