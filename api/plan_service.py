@@ -191,6 +191,10 @@ def plan_payload(snapshot: dict, plan: dict) -> dict:
     ideas.sort(key=lambda item: (-item[2], item[0]))
     for ticker, details, score, price, date, signals in ideas[:MAX_BLOCKED_BULLISH_IDEAS]:
         blocked = str(details.get("reason") or "This stock did not qualify for a purchase in the saved plan.")
+        blocked = blocked.replace("No available regime-preferred long strategy",
+                                  "The broader-market filter currently blocks new purchases")
+        blocked = blocked.replace("No BUY vote from a regime-preferred strategy",
+                                  "None of the strategies favored for this market supports buying")
         add({
             "Ticker": ticker, "Score": score, "Price": price, "Price As Of": date,
             "Reason": f"Algorithms show bullish signals, but buying is blocked: {blocked} This is an idea to research, not a purchase instruction.",

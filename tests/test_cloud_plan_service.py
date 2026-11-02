@@ -25,7 +25,7 @@ def test_blocked_bullish_ideas_are_bounded_waits_not_executable_buys():
     assert all(row["action"] == row["signal"] == "WAIT" for row in rows)
     assert all(row["factor_details"]["Blocked Bullish Idea"] for row in rows)
     assert all("Proposed Quantity" not in row["factor_details"] for row in rows)
-    assert "regime-preferred" in rows[0]["reason"]
+    assert "broader-market filter" in rows[0]["reason"]
     assert plan == before
 
 
