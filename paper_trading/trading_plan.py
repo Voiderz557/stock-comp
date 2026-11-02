@@ -618,6 +618,59 @@ def _consensus_candidate_diagnostics(universe, outputs, ranked, recommendation, 
     return diagnostics
 
 
+def _candidate_rank_evidence(universe, outputs, names, get_strategy_fn, quotes, reference_as_of):
+    """Internal ranking of ALL complete candidates, independent of BUY gates.
+
+    Average within-strategy percentile ranks (0..100), using each strategy's
+    existing rank_key. Ties receive their midpoint rank; a singleton gets 50.
+    This orders eligible purchases; it is not a probability or a new BUY signal.
+    Missing/non-finite outputs and off-session quotes are explicitly unranked.
+    """
+    evidence = {}
+    valid = []
+    session = pd.Timestamp(reference_as_of).date() if reference_as_of else None
+    for ticker in dict.fromkeys(universe):
+        results = outputs.get(ticker, {})
+        quote = quotes.get(ticker)
+        complete = bool(names) and all(
+            isinstance(results.get(name), dict)
+            and results[name].get("Signal") in {"BUY", "WAIT", "AVOID"}
+            and isinstance(results[name].get("Score"), (int, float))
+            and math.isfinite(results[name]["Score"])
+            for name in names
+        )
+        dated = bool(quote and is_valid_market_price(quote.get("price"))
+                     and session is not None and _quote_session(quote) == session)
+        evidence[ticker] = {
+            "candidate_rank_score": None,
+            "candidate_rank_reason": None if complete and dated else (
+                "Incomplete strategy evidence; not ranked." if not complete else
+                "Price is missing or not from the plan's market session; not ranked."
+            ),
+            "price": quote["price"] if quote else None,
+            "price_as_of": str(quote["as_of"]) if quote else None,
+            "strategy_signals": {name: (results.get(name) or {}).get("Signal") for name in names},
+        }
+        if complete and dated:
+            valid.append(ticker)
+    points = {ticker: [] for ticker in valid}
+    for name in names:
+        rank_key = get_strategy_fn(name).rank_key
+        ordered = sorted(valid, key=lambda ticker: rank_key(outputs[ticker][name]), reverse=True)
+        first = 0
+        while first < len(ordered):
+            last = first + 1
+            while last < len(ordered) and rank_key(outputs[ordered[last]][name]) == rank_key(outputs[ordered[first]][name]):
+                last += 1
+            percentile = 50.0 if len(ordered) == 1 else 100.0 * (1 - (first + last - 1) / 2 / (len(ordered) - 1))
+            for ticker in ordered[first:last]:
+                points[ticker].append(percentile)
+            first = last
+    for ticker in valid:
+        evidence[ticker]["candidate_rank_score"] = round(sum(points[ticker]) / len(names), 4)
+    return evidence
+
+
 def build_trading_plan(
     mode,
     account_state,
@@ -638,6 +691,8 @@ def build_trading_plan(
     ranked = []
     unavailable_universe = []
     candidate_diagnostics = {}
+    watch_outputs = {}
+    watch_names = []
 
     if mode == CONSENSUS_MODE:
         ranked, unavailable_universe, consensus_outputs = _consensus_scan(
@@ -646,14 +701,17 @@ def build_trading_plan(
         candidate_diagnostics = _consensus_candidate_diagnostics(
             universe, consensus_outputs, ranked, resolved["recommendation"], open_positions
         )
+        watch_outputs, watch_names = consensus_outputs, live_strategy_names()
         for ticker in list(dict.fromkeys([*universe, *(p["ticker"] for p in open_positions or [])])):
             quote = _quote_for(ticker, price_data)
             if quote is not None:
                 quotes[ticker] = quote
     elif definition is not None:
+        watch_names = [definition.name]
         scored = []
         for ticker in universe:
             result = analyze_ticker(definition, ticker, price_data)
+            watch_outputs[ticker] = {definition.name: result}
             quote = _quote_for(ticker, price_data)
             if quote is not None:
                 quotes[ticker] = quote
@@ -700,6 +758,21 @@ def build_trading_plan(
     if not market_reference_dates:
         market_reference_dates = [quote["as_of"] for quote in quotes.values()]
     reference_quote_as_of = max(market_reference_dates, default=None)
+
+    evidence = _candidate_rank_evidence(
+        universe, watch_outputs, watch_names, get_strategy_fn, quotes, reference_quote_as_of
+    )
+    for ticker, details in evidence.items():
+        candidate_diagnostics[ticker].update(details)
+
+    # Rank the complete scan internally, then spend the existing shared budget
+    # on the highest-ranked candidates that passed the unchanged BUY gates.
+    # Original strategy/consensus scores remain recorded; no WATCH becomes BUY.
+    ranked.sort(key=lambda row: (
+        -(evidence[row["Ticker"]]["candidate_rank_score"]
+          if evidence[row["Ticker"]]["candidate_rank_score"] is not None else -1),
+        row["Ticker"],
+    ))
 
     allocation = allocate_buy_candidates(
         ranked,

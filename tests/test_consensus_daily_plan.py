@@ -120,6 +120,71 @@ def test_consensus_leaves_cash_in_downtrend_and_excludes_missing_strategy_output
     assert partial["candidate_diagnostics"]["AAA"]["status"] == "UNAVAILABLE"
 
 
+def test_watchlist_ranks_all_wait_stocks_in_downtrend_without_forcing_buys():
+    tickers = ["CCC", "AAA", "BBB"]
+    signals = {name: {ticker: "WAIT" for ticker in tickers} for name in NAMES}
+    plan = build_trading_plan(
+        CONSENSUS_MODE, _account(), [], _prices(tickers), tickers,
+        regime_result=_regime(DOWNTREND), get_strategy_fn=_getter(signals),
+    )
+    diagnostics = plan["candidate_diagnostics"]
+    assert {ticker: row["candidate_rank_score"] for ticker, row in diagnostics.items()} == {
+        "AAA": 100, "BBB": 50, "CCC": 0,
+    }
+    assert plan["buys"] == [] and plan["cash_after"] == 100_000
+    assert all(row["score"] is None for row in diagnostics.values())
+    assert diagnostics["AAA"]["strategy_signals"] == {name: "WAIT" for name in NAMES}
+    assert "No available regime-preferred" in diagnostics["AAA"]["reason"]
+    plan["market_data_as_of"] = plan["reference_quote_as_of"]
+    payload = plan_payload({"account": {"portfolio_version": 1}, "portfolio": {"cash": 100_000}, "positions": []}, plan)
+    assert payload["recommendations"] == []
+    assert payload["portfolio_snapshot"]["candidate_diagnostics"]["AAA"]["candidate_rank_score"] == 100
+
+
+def test_watchlist_ties_scaling_and_order_are_deterministic():
+    tickers = ["AAA", "AAB", "BBB"]
+    signals = {name: {ticker: "WAIT" for ticker in tickers} for name in NAMES}
+    def build(order, scales):
+        return build_trading_plan(CONSENSUS_MODE, _account(), [], _prices(tickers), order,
+            regime_result=_regime(), get_strategy_fn=_getter(signals, scales))
+    first, second = build(tickers, {}), build(list(reversed(tickers)), {NAMES[0]: 1_000_000})
+    assert first["candidate_diagnostics"] == second["candidate_diagnostics"]
+    assert first["candidate_diagnostics"]["AAA"]["candidate_rank_score"] == 75
+    assert first["candidate_diagnostics"]["AAB"]["candidate_rank_score"] == 75
+    assert first["buys"] == second["buys"]
+
+
+def test_internal_ranking_selects_best_eligible_stock_with_shared_cash_and_existing_scores():
+    tickers = ["AAA", "BBB"]
+    signals = {name: {ticker: "BUY" for ticker in tickers} for name in NAMES}
+    args = (CONSENSUS_MODE, {"Cash": 10_000, "Starting Capital": 100_000}, [], _prices(tickers), tickers)
+    kwargs = {"regime_result": _regime(), "get_strategy_fn": _getter(signals), "target_position_value": 10_000, "whole_shares": True}
+    with patch("paper_trading.trading_plan._candidate_rank_evidence", return_value={
+        "AAA": {"candidate_rank_score": 0}, "BBB": {"candidate_rank_score": 100},
+    }):
+        plan = build_trading_plan(*args, **kwargs)
+    assert [row["Ticker"] for row in plan["buys"]] == ["BBB"]
+    assert plan["buys"][0]["Quantity"] == 100
+    assert plan["cash_after"] == 0
+    assert plan["buys"][0]["Score"] == pytest.approx(90)
+    assert plan["holdings"] == []
+
+
+def test_watchlist_missing_and_stale_evidence_stays_unranked():
+    tickers = ["AAA", "BBB", "CCC"]
+    signals = {name: {ticker: "WAIT" for ticker in tickers} for name in NAMES}
+    del signals[NAMES[0]]["AAA"]
+    prices = _prices(tickers)
+    prices["BBB"].index = pd.DatetimeIndex(["2026-10-05"])
+    plan = build_trading_plan(CONSENSUS_MODE, _account(), [], prices, tickers,
+        regime_result=_regime(), get_strategy_fn=_getter(signals))
+    rows = plan["candidate_diagnostics"]
+    assert rows["AAA"]["candidate_rank_score"] is None
+    assert rows["BBB"]["candidate_rank_score"] is None
+    assert "market session" in rows["BBB"]["candidate_rank_reason"]
+    assert rows["CCC"]["candidate_rank_score"] == 50
+
+
 def test_candidate_diagnostics_explain_signal_and_allocation_without_changing_buys():
     tickers = ["AAA", "BBB"]
     signals = {name: {"AAA": "BUY", "BBB": "WAIT"} for name in NAMES}

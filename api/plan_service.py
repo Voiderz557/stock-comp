@@ -20,6 +20,9 @@ from paper_trading.trading_plan import (
     load_and_build_trading_plan,
 )
 
+MAX_BLOCKED_BULLISH_IDEAS = 5
+MIN_BULLISH_IDEA_BUY_VOTES = 2
+
 
 def account_inputs(snapshot: dict) -> tuple[dict, list[dict]]:
     account = snapshot.get("account") or {}
@@ -165,6 +168,35 @@ def plan_payload(snapshot: dict, plan: dict) -> dict:
         plan_action = row.get("Action")
         public_action = "SELL" if plan_action == "REVIEW EXIT" else "WAIT"
         add(row, public_action, str(row.get("Signal") or plan_action or "WAIT"))
+
+    # Research ideas are persisted as WAIT, never executable BUY proposals.
+    # Keep holding reviews and real allocations authoritative for each ticker.
+    held = {str(position.get("ticker") or "").upper() for position in snapshot.get("positions") or []}
+    ideas = []
+    for ticker, details in (plan.get("candidate_diagnostics") or {}).items():
+        signals = details.get("strategy_signals") or {}
+        votes = list(signals.values())
+        score = _optional_float(details.get("candidate_rank_score"))
+        price = _optional_float(details.get("price"))
+        date = _timestamp_or_none(details.get("price_as_of"))
+        session = _timestamp_or_none(plan.get("market_data_as_of"))
+        if (ticker in seen or ticker in held or score is None or not math.isfinite(score)
+                or price is None or not math.isfinite(price) or price <= 0
+                or not date or not session or date[:10] != session[:10]
+                or not votes or any(vote not in {"BUY", "WAIT", "AVOID"} for vote in votes)
+                or votes.count("BUY") < min(MIN_BULLISH_IDEA_BUY_VOTES, len(votes))
+                or votes.count("BUY") <= votes.count("AVOID")):
+            continue
+        ideas.append((ticker, details, score, price, date, signals))
+    ideas.sort(key=lambda item: (-item[2], item[0]))
+    for ticker, details, score, price, date, signals in ideas[:MAX_BLOCKED_BULLISH_IDEAS]:
+        blocked = str(details.get("reason") or "This stock did not qualify for a purchase in the saved plan.")
+        add({
+            "Ticker": ticker, "Score": score, "Price": price, "Price As Of": date,
+            "Reason": f"Algorithms show bullish signals, but buying is blocked: {blocked} This is an idea to research, not a purchase instruction.",
+            "Factor Details": {"Blocked Bullish Idea": True, "Strategy Signals": signals,
+                               "Purchase Block Reason": blocked, "Internal Candidate Rank Score": score},
+        }, "WAIT", "WAIT")
 
     # The paper-action RPC requires a same-session saved quote for *every*
     # open holding. An unscored holding cannot be persisted as a recommendation

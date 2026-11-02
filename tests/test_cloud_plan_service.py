@@ -1,9 +1,56 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from copy import deepcopy
 
 from api.plan_service import account_inputs, build_cloud_plan, plan_payload
 from data.scanner_universe import BROAD_CURRENT_SCANNER_UNIVERSE
+
+
+def _blocked_plan():
+    return {"market_data_as_of": "2026-10-30", "buys": [], "holdings": [],
+        "candidate_diagnostics": {ticker: {
+            "candidate_rank_score": 100 - i, "price": 100, "price_as_of": "2026-10-30",
+            "strategy_signals": {"a": "BUY", "b": "BUY", "c": "WAIT"},
+            "reason": "No available regime-preferred long strategy.",
+        } for i, ticker in enumerate(["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"])}}
+
+
+def test_blocked_bullish_ideas_are_bounded_waits_not_executable_buys():
+    plan = _blocked_plan()
+    before = deepcopy(plan)
+    payload = plan_payload({"account": {"portfolio_version": 1}, "portfolio": {"cash": 100000}, "positions": []}, plan)
+    rows = payload["recommendations"]
+    assert [row["ticker"] for row in rows] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
+    assert all(row["action"] == row["signal"] == "WAIT" for row in rows)
+    assert all(row["factor_details"]["Blocked Bullish Idea"] for row in rows)
+    assert all("Proposed Quantity" not in row["factor_details"] for row in rows)
+    assert "regime-preferred" in rows[0]["reason"]
+    assert plan == before
+
+
+def test_blocked_ideas_exclude_stale_missing_nonfinite_and_conflicted_evidence():
+    plan = _blocked_plan()
+    rows = plan["candidate_diagnostics"]
+    rows["AAA"]["price_as_of"] = "2026-10-29"
+    rows["BBB"]["candidate_rank_score"] = None
+    rows["CCC"]["strategy_signals"]["c"] = None
+    rows["DDD"]["strategy_signals"] = {"a": "BUY", "b": "AVOID"}
+    rows["EEE"]["price"] = float("nan")
+    rows["FFF"]["candidate_rank_score"] = float("inf")
+    payload = plan_payload({"account": {"portfolio_version": 1}, "portfolio": {"cash": 100000}, "positions": []}, plan)
+    assert payload["recommendations"] == []
+
+
+def test_blocked_idea_never_replaces_holding_review_or_real_buy():
+    plan = _blocked_plan()
+    plan["buys"] = [{"Ticker": "AAA", "Score": 80, "Signal": "BUY", "Price": 100, "Price As Of": "2026-10-30", "Quantity": 20}]
+    plan["holdings"] = [{"Ticker": "BBB", "Score": 10, "Action": "REVIEW EXIT", "Signal": "AVOID", "Price": 100, "Price As Of": "2026-10-30"}]
+    snapshot = {"account": {"portfolio_version": 1}, "portfolio": {"cash": 100000}, "positions": [{"ticker":"BBB","side":"LONG"}]}
+    rows = plan_payload(snapshot, plan)["recommendations"]
+    assert len({row["ticker"] for row in rows}) == len(rows)
+    assert rows[0]["action"] == "BUY" and rows[1]["action"] == "SELL"
+    assert all(not row["factor_details"].get("Blocked Bullish Idea") for row in rows[:2])
 
 
 def _snapshot():
