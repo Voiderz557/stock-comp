@@ -40,6 +40,7 @@ from api.portfolio_valuation import load_portfolio_valuation
 from api.account_export import export_owned_account_data
 from api.account_deletion import preview_deletion, confirm_deletion
 from api.external_research import get_external_research
+from api.ticker_opinion import build_ticker_opinion, OpinionBusy
 from api.journal_service import load_journal
 from api.planning_profiles import (
     PlanningProfileWrite,
@@ -388,6 +389,21 @@ def create_app() -> FastAPI:
         if abs(result["entry_price"] - saved_price) / saved_price > 0.005:
             raise HTTPException(status_code=409, detail="Candidate and sizing prices disagree. Rebuild the plan.")
         return result
+
+    @application.get("/v1/research/opinion/{ticker}")
+    async def ticker_opinion(ticker: str, principal: Principal = Depends(require_principal)) -> dict:
+        if principal.is_demo or not principal.access_token:
+            raise HTTPException(403, "Sign in to request a ticker opinion.")
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(build_ticker_opinion, ticker), timeout=60)
+        except ValueError as exc:
+            raise HTTPException(422, "Enter a valid ticker with available daily history.") from exc
+        except OpinionBusy as exc:
+            raise HTTPException(503, "Another ticker check is running. Try again shortly.") from exc
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(503, "Ticker research timed out. No opinion was produced.") from exc
+        except Exception as exc:
+            raise HTTPException(503, "Market data is unavailable. Please retry later.") from exc
 
     @application.get("/v1/research/company/{ticker}")
     async def company_research(
