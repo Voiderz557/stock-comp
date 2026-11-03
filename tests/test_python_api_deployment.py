@@ -259,6 +259,7 @@ health = client.get('/v1/health')
 assert health.status_code == 200 and health.json()['status'] == 'ok'
 assert client.get('/v1/snapshot').status_code == 503
 assert available_strategy_names()
+assert '/v1/research/opinion/{ticker}' in app.openapi()['paths']
 assert not Path('paper_trading_data').exists()
 assert not list(Path.cwd().rglob('*.sqlite*'))
 print(json.dumps(health.json()))
