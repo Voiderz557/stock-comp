@@ -248,6 +248,7 @@ def plan_payload(snapshot: dict, plan: dict) -> dict:
         "market_as_of": market_as_of,
         "summary": summary,
         "portfolio_snapshot": {
+            "account_id": (snapshot.get("account") or {}).get("id"),
             "cash": snapshot["portfolio"]["cash"],
             "positions": snapshot.get("positions") or [],
             "minimum_stock_price": plan.get("user_minimum_price", MIN_STOCK_PRICE),

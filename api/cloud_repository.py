@@ -11,10 +11,14 @@ identity check and an explicit, single-use self-deletion confirmation.
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar
 from uuid import UUID
 
 import httpx
 from fastapi import HTTPException, status
+
+# Request-local, inherited by the scan task at creation, never process-global.
+selected_portfolio: ContextVar[str | None] = ContextVar("selected_portfolio", default=None)
 
 
 def cloud_repository_configured() -> bool:
@@ -64,12 +68,36 @@ def _trusted_plan_writer_headers() -> dict[str, str]:
 
 
 async def load_account_snapshot(access_token: str, account_id: UUID | None = None) -> dict:
+    scoped_id = selected_portfolio.get()
+    if scoped_id and account_id and str(account_id) != scoped_id:
+        raise HTTPException(409, "The requested portfolio differs from the selected portfolio.")
+    account_id = account_id or (UUID(scoped_id) if scoped_id else None)
     return await _call_rpc(
         access_token,
         "get_current_account_snapshot",
         {"p_account_id": str(account_id) if account_id else None},
         missing_account_is_not_found=True,
     )
+
+
+async def list_portfolios(access_token: str) -> list:
+    rows = await _call_rpc(access_token, "list_competition_accounts", {})
+    if not isinstance(rows, list):
+        raise HTTPException(502, "Portfolio list returned invalid data.")
+    return rows
+
+
+async def create_portfolio(access_token: str, request: dict) -> dict:
+    account_id = await _call_rpc(access_token, "create_portfolio", {"p_" + key: value for key, value in request.items()})
+    try:
+        parsed = UUID(account_id)
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(502, "Portfolio creation returned invalid data.") from None
+    scope = selected_portfolio.set(str(parsed))
+    try:
+        return await load_account_snapshot(access_token, parsed)
+    finally:
+        selected_portfolio.reset(scope)
 
 
 async def create_competition_account(
@@ -130,6 +158,9 @@ async def save_current_trading_plan(access_token: str, payload: dict, *, user_id
         verified_user_id = str(UUID(user_id))
     except (TypeError, ValueError, AttributeError) as exc:
         raise HTTPException(status_code=401, detail="Verified user identity is invalid.") from exc
+    target_id = payload["portfolio_snapshot"].get("account_id")
+    if selected_portfolio.get() and target_id != selected_portfolio.get():
+        raise HTTPException(409, "The generated plan belongs to a different portfolio.")
     await _call_trusted_plan_writer(
         {
             "p_user_id": verified_user_id,
@@ -143,6 +174,8 @@ async def save_current_trading_plan(access_token: str, payload: dict, *, user_id
             "p_recommendations": payload["recommendations"],
         },
     )
+    if target_id:
+        return await load_account_snapshot(access_token, UUID(target_id))
     return await load_account_snapshot(access_token)
 
 
@@ -374,6 +407,8 @@ async def _call_rpc(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    if selected_portfolio.get():
+        headers["X-Portfolio-Id"] = selected_portfolio.get()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
             response = await client.post(
@@ -402,6 +437,15 @@ async def _call_rpc(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Portfolio or plan changed. Refresh and review before saving.",
             )
+        if provider_code in {"42501", "22023"}:
+            raise HTTPException(409, "Select an available portfolio and refresh before continuing.")
+        if provider_code == "P0001" and str(provider_payload.get("message") or "") in {
+            "Explicit portfolio selection is required.", "Selected portfolio is not owned by this user.",
+            "Invalid x-portfolio-id header.", "Portfolio selection does not match the requested account.",
+            "Explicit account and portfolio header disagree."}:
+            raise HTTPException(409, "Select an available portfolio and refresh before continuing.")
+        if response.status_code == 404 or provider_code == "PGRST202":
+            raise HTTPException(503, "Portfolio storage needs its server update before this operation is available.")
         if paper_action and provider_code == "P0001":
             allowed_errors = (
                 "A recommendation, whole-share quantity", "No competition account exists",

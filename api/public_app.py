@@ -14,11 +14,13 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from api.auth import Principal, require_principal
 from api.cloud_repository import (
     cloud_repository_configured,
+    selected_portfolio, list_portfolios, create_portfolio,
     trusted_plan_storage_configured,
     validate_trusted_plan_storage_configuration,
     create_competition_account,
@@ -103,6 +105,11 @@ class AccountCreateRequest(BaseModel):
         if not cleaned:
             raise ValueError("Account name cannot be blank.")
         return cleaned
+
+
+class PortfolioCreateRequest(AccountCreateRequest):
+    model_config = {"extra": "forbid", "allow_inf_nan": False}
+    request_id: UUID
 
 
 class PositionSnapshotRequest(BaseModel):
@@ -192,7 +199,7 @@ def create_app() -> FastAPI:
         allow_origins=_allowed_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "X-Portfolio-Id"],
     )
     limiter = FixedWindowRateLimiter()
     plan_jobs = PlanJobs()
@@ -207,7 +214,17 @@ def create_app() -> FastAPI:
         allowed, remaining, retry_after = limiter.check(client_rate_key(request, request_class), limit)
         if not allowed:
             return rate_limited_response(limit, retry_after)
-        response = await call_next(request)
+        portfolio_id = request.headers.get("X-Portfolio-Id")
+        if portfolio_id is not None:
+            try:
+                portfolio_id = str(UUID(portfolio_id))
+            except ValueError:
+                return secure_response(JSONResponse(status_code=422, content={"detail": "Invalid portfolio selection."}))
+        scope = selected_portfolio.set(portfolio_id)
+        try:
+            response = await call_next(request)
+        finally:
+            selected_portfolio.reset(scope)
         response.headers["X-RateLimit-Limit"] = str(limit)
         response.headers["X-RateLimit-Remaining"] = str(remaining)
         return secure_response(response)
@@ -243,6 +260,18 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="Sign in to refresh portfolio prices.")
         current = await load_account_snapshot(principal.access_token)
         return await load_portfolio_valuation(current)
+
+    @application.get("/v1/portfolios")
+    async def portfolios(principal: Principal = Depends(require_principal)) -> dict:
+        if principal.is_demo or not principal.access_token:
+            raise HTTPException(403, "Sign in to view your portfolios.")
+        return {"portfolios": await list_portfolios(principal.access_token)}
+
+    @application.post("/v1/portfolios", status_code=201)
+    async def new_portfolio(request: PortfolioCreateRequest, principal: Principal = Depends(require_principal)) -> dict:
+        if principal.is_demo or not principal.access_token:
+            raise HTTPException(403, "Sign in to create a portfolio.")
+        return visible_snapshot(await create_portfolio(principal.access_token, request.model_dump(mode="json")))
 
     @application.post("/v1/accounts", status_code=status.HTTP_201_CREATED)
     async def create_account(
@@ -452,7 +481,7 @@ def create_app() -> FastAPI:
             raise HTTPException(503, "Authenticated trusted plan storage is not configured. No scan was started.")
         validate_trusted_plan_storage_configuration()
         current = await load_account_snapshot(principal.access_token)
-        fingerprint = (current["account"]["portfolio_version"], request.strategy,
+        fingerprint = (current["account"].get("id"), current["account"]["portfolio_version"], request.strategy,
                        request.target_position_value, request.minimum_price, request.universe_mode)
 
         async def execute(progress, timeout, job):
@@ -483,9 +512,12 @@ def create_app() -> FastAPI:
         if principal.is_demo or not principal.access_token:
             raise HTTPException(403, "Sign in to read your scan progress.")
         job = plan_jobs.get(principal.user_id, job_id)
+        current = await load_account_snapshot(principal.access_token)
+        if job.fingerprint[0] != current["account"].get("id"):
+            raise HTTPException(404, "This scan belongs to a different portfolio.")
         result = job.public()
         if job.status == "SUCCEEDED":
-            result["snapshot"] = visible_snapshot(await load_account_snapshot(principal.access_token))
+            result["snapshot"] = visible_snapshot(current)
         return result
 
     @application.post("/v1/plans/current")
