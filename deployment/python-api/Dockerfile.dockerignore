@@ -23,6 +23,8 @@ api/**
 !api/demo_data.py
 !api/external_research.py
 !api/ticker_opinion.py
+!api/research_comparison.py
+!api/research_news.py
 !api/recommendation_journal.py
 !api/journal_service.py
 !api/plan_service.py

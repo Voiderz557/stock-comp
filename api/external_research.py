@@ -234,7 +234,9 @@ async def _sec(ticker, agent):
                 if isinstance(mapping, str):
                     raise _Unavailable(mapping)
                 cik = _resolve(mapping, ticker)
-                items = _filings(await _json(client, f"https://data.sec.gov/submissions/CIK{cik:010d}.json"), cik)
+                submission = await _json(client, f"https://data.sec.gov/submissions/CIK{cik:010d}.json")
+                items = _filings(submission, cik)
+                _put((identity, "__profile__", ticker), company_profile(submission), SUCCESS_TTL)
             result = (items, "ok", "recent_filings_only")
         except asyncio.CancelledError:
             _put(key, ([], "unavailable", "timeout"), FAILURE_TTL)
@@ -285,3 +287,74 @@ async def get_external_research(ticker, now=None):
     result["providers"] = [{"name": "sec", "status": status, "reason": reason},
                            {"name": "massive", "status": "unavailable", "reason": "runtime_adapter_not_configured"}]
     return result
+
+
+def company_profile(submission):
+    """SEC SIC division, explicitly not a GICS sector or an inferred classification."""
+    clean = lambda value: value.strip()[:200] if isinstance(value, str) and value.strip() else None
+    sic = str(submission.get("sic", ""))
+    code = int(sic) if sic.isdigit() else -1
+    divisions = ((100, 999, "Agriculture, forestry and fishing"), (1000, 1499, "Mining"),
+                 (1500, 1799, "Construction"), (2000, 3999, "Manufacturing"),
+                 (4000, 4999, "Transportation, communications and utilities"),
+                 (5000, 5199, "Wholesale trade"), (5200, 5999, "Retail trade"),
+                 (6000, 6799, "Finance, insurance and real estate"), (7000, 8999, "Services"))
+    return {"name": clean(submission.get("name")), "industry": clean(submission.get("sicDescription")),
+            "sector": next((label for low, high, label in divisions if low <= code <= high), None),
+            "classification": "SEC SIC division (not GICS)", "source": "SEC EDGAR"}
+
+
+def cached_company_profile(ticker):
+    agent = os.getenv("STOCK_COMP_SEC_USER_AGENT", "").strip()
+    return _get((hashlib.sha256(agent.encode()).hexdigest(), "__profile__", _symbol(ticker)))
+
+
+async def get_company_facts(ticker):
+    """Bounded SEC XBRL fetch; reuse the filing client's identity, gate and cache.
+
+    Call after get_external_research so the validated ticker mapping is cached.
+    Raw company facts are internal and must never be returned directly to clients.
+    """
+    agent = os.getenv("STOCK_COMP_SEC_USER_AGENT", "").strip()
+    identity = hashlib.sha256(agent.encode()).hexdigest()
+    symbol = _symbol(ticker)
+    if not symbol or not agent:
+        return None, "missing_configuration"
+    while not _gate.acquire(blocking=False):
+        await asyncio.sleep(0.01)
+    key = (identity, "__facts__", symbol)
+    try:
+        cached = _get(key)
+        if cached is not None:
+            return cached
+        mapping = _get((identity, "__mapping__"))
+        if not isinstance(mapping, dict):
+            return None, "ticker_mapping_unavailable"
+        try:
+            cik = _resolve(mapping, symbol)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0), follow_redirects=False, trust_env=False,
+                headers={"User-Agent": agent, "Accept": "application/json", "Accept-Encoding": "identity"}) as client:
+                data = await _json(client, f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json")
+            if str(data.get("cik", "")).lstrip("0") != str(cik):
+                raise _Unavailable("invalid_response")
+            # Cache only the bounded concepts used by this feature, not a multi-MB
+            # companyfacts document for every requested ticker.
+            gaap = (data.get("facts") or {}).get("us-gaap") or {}
+            selected = {}
+            for tag in ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "NetIncomeLoss"):
+                rows = ((gaap.get(tag) or {}).get("units") or {}).get("USD") or []
+                rows = [row for row in rows if isinstance(row, dict) and isinstance(row.get("filed"), str)]
+                selected[tag] = {"units": {"USD": [
+                    {key: row.get(key) for key in ("start", "end", "filed", "val", "accn", "form")}
+                    for row in sorted(rows, key=lambda row: row["filed"], reverse=True)[:200]]}}
+            data = {"cik": cik, "facts": {"us-gaap": selected}}
+            result = data, "ok"
+        except (_Unavailable, httpx.HTTPError):
+            result = None, "provider_unavailable"
+        _put(key, result, SUCCESS_TTL if result[0] else FAILURE_TTL)
+        return result
+    except asyncio.CancelledError:
+        _put(key, (None, "timeout"), FAILURE_TTL)
+        raise
+    finally:
+        _gate.release()

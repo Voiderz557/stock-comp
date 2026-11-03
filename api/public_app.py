@@ -41,6 +41,7 @@ from api.account_export import export_owned_account_data
 from api.account_deletion import preview_deletion, confirm_deletion
 from api.external_research import get_external_research
 from api.ticker_opinion import build_ticker_opinion, OpinionBusy
+from api.research_comparison import enrich_opinion
 from api.journal_service import load_journal
 from api.planning_profiles import (
     PlanningProfileWrite,
@@ -395,7 +396,7 @@ def create_app() -> FastAPI:
         if principal.is_demo or not principal.access_token:
             raise HTTPException(403, "Sign in to request a ticker opinion.")
         try:
-            return await asyncio.wait_for(asyncio.to_thread(build_ticker_opinion, ticker), timeout=60)
+            return await enrich_opinion(ticker, build_ticker_opinion)
         except ValueError as exc:
             raise HTTPException(422, "Enter a valid ticker with available daily history.") from exc
         except OpinionBusy as exc:

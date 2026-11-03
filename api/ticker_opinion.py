@@ -98,7 +98,13 @@ def _build(ticker, loader, now):
                f"{counts['AVOID']} advise avoiding new purchases, and {counts['UNAVAILABLE']} are unavailable.")
     if regime and not regime["preferred_strategies"]:
         summary += " The broader-market filter currently blocks new purchases."
-    return {"ticker": ticker, "as_of": now.isoformat(), "price": quote["price"] if quote else None,
+    history = []
+    stock_frame = frames.get(ticker)
+    if stock_frame is not None and "Close" in stock_frame:
+        for date, value in stock_frame["Close"].tail(252).items():
+            if pd.notna(value) and math.isfinite(float(value)) and float(value) > 0:
+                history.append({"date": pd.Timestamp(date).date().isoformat(), "close": float(value)})
+    return {"ticker": ticker, "price_history": history, "as_of": now.isoformat(), "price": quote["price"] if quote else None,
             "price_as_of": quote["as_of"][:10] if quote else None, "summary": summary,
             "strategies": results, "regime": regime, "warnings": warnings,
             "scope": "Rule-based research opinion, not AI or a trade order. Daily closes, not live prices. Scores are strategy-specific, not probabilities. Cash, holdings and competition eligibility have not been checked; use the daily plan for allocations."}
